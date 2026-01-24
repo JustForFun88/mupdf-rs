@@ -10,8 +10,8 @@ use mupdf_sys::*;
 
 use crate::pdf::{PdfGraftMap, PdfObject, PdfPage};
 use crate::{
-    context, from_enum, Buffer, CjkFontOrdering, Destination, Document, Error, FilePath, Font,
-    Image, Outline, SimpleFontEncoding, Size, WriteMode,
+    context, from_enum, Buffer, CjkFontOrdering, Destination, DestinationKind, Document, Error,
+    FilePath, Font, Image, Matrix, Outline, SimpleFontEncoding, Size, WriteMode,
 };
 
 bitflags! {
@@ -577,8 +577,22 @@ impl PdfDocument {
                 .map(|dest| {
                     let page = self.find_page(dest.loc.page_number as i32)?;
 
-                    let matrix = page.page_ctm()?;
-                    let dest_kind = dest.kind.transform(&matrix);
+                    let ctm = page.page_ctm()?;
+
+                    // TODO: Remove this hack when updating to next release of MuPDF
+                    // (> MuPDF 1.27.0), see https://bugs.ghostscript.com/show_bug.cgi?id=709082
+                    let kind = normalize_internal_fit_r(dest.kind, &ctm);
+
+                    // Use inverse current transformation matrix (CTM) to convert from user
+                    // space to PDF page space.
+                    //
+                    // Since this is a local destination (not remote), we must transform
+                    // coordinates from the shared user space back to the specific page space.
+                    //
+                    // This matches MuPDF's logic in `pdf_new_dest_from_link`
+                    // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1328
+                    let inv_ctm = ctm.invert();
+                    let dest_kind = kind.transform(&inv_ctm);
                     let dest = Destination::new(page, dest_kind);
 
                     let mut array = self.new_array()?;
@@ -643,6 +657,16 @@ impl PdfDocument {
         }
 
         Ok(())
+    }
+}
+
+// TODO: Remove this hack when updating to next release of MuPDF
+// (> MuPDF 1.27.0), see https://bugs.ghostscript.com/show_bug.cgi?id=709082
+fn normalize_internal_fit_r(kind: DestinationKind, ctm: &Matrix) -> DestinationKind {
+    if let DestinationKind::FitR { .. } = kind {
+        kind.transform(ctm)
+    } else {
+        kind
     }
 }
 
