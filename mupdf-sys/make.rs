@@ -207,6 +207,12 @@ impl Make {
             self.build.flag("-Wa,-mbig-obj");
         }
 
+        // Match MuPDF's Makerules OS=wasm flags for wasm exceptions
+        if target.os == "emscripten" {
+            self.build.flag("-fwasm-exceptions");
+            self.build.flag("-sSUPPORT_LONGJMP=wasm");
+        }
+
         self.libs()?;
         self.cpus(target);
 
