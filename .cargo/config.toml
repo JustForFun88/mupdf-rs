@@ -1,2 +1,5 @@
 [target.wasm32-unknown-emscripten]
-rustflags = ["-C", "link-arg=-sSUPPORT_LONGJMP=emscripten"]
+rustflags = [
+    "-C", "link-arg=-sSUPPORT_LONGJMP=emscripten",
+    "-C", "link-arg=-fno-wasm-exceptions",
+]
