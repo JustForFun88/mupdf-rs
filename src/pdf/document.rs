@@ -249,6 +249,10 @@ impl PdfDocument {
         Self { inner: ptr, doc }
     }
 
+    pub(crate) fn as_raw(&self) -> *mut pdf_document {
+        self.inner
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -300,8 +304,18 @@ impl PdfDocument {
             .map(|inner| unsafe { PdfObject::from_raw(inner) })
     }
 
+    pub fn new_array_with_capacity(&self, capacity: i32) -> Result<PdfObject, Error> {
+        unsafe { ffi_try!(mupdf_pdf_new_array(context(), self.inner, capacity)) }
+            .map(|inner| unsafe { PdfObject::from_raw(inner) })
+    }
+
     pub fn new_dict(&self) -> Result<PdfObject, Error> {
         unsafe { ffi_try!(mupdf_pdf_new_dict(context(), self.inner, 0)) }
+            .map(|inner| unsafe { PdfObject::from_raw(inner) })
+    }
+
+    pub fn new_dict_with_capacity(&self, capacity: i32) -> Result<PdfObject, Error> {
+        unsafe { ffi_try!(mupdf_pdf_new_dict(context(), self.inner, capacity)) }
             .map(|inner| unsafe { PdfObject::from_raw(inner) })
     }
 
@@ -509,6 +523,13 @@ impl PdfDocument {
             .map(|inner| unsafe { PdfObject::from_raw(inner) })
     }
 
+    /// Loads a PdfPage from a page index.
+    /// Helper function to convert from Document page loading to PdfPage.
+    pub fn load_pdf_page(&self, page_no: i32) -> Result<PdfPage, Error> {
+        let page = self.doc.load_page(page_no)?;
+        PdfPage::try_from(page)
+    }
+
     pub fn new_page_at<T: Into<Size>>(&mut self, page_no: i32, size: T) -> Result<PdfPage, Error> {
         let size = size.into();
         let inner = unsafe {
@@ -662,7 +683,7 @@ impl PdfDocument {
 
 // TODO: Remove this hack when updating to next release of MuPDF
 // (> MuPDF 1.27.0), see https://bugs.ghostscript.com/show_bug.cgi?id=709082
-fn normalize_internal_fit_r(kind: DestinationKind, ctm: &Matrix) -> DestinationKind {
+pub(crate) fn normalize_internal_fit_r(kind: DestinationKind, ctm: &Matrix) -> DestinationKind {
     if let DestinationKind::FitR { .. } = kind {
         kind.transform(ctm)
     } else {
