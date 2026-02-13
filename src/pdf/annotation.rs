@@ -8,6 +8,7 @@ use mupdf_sys::*;
 use crate::{color::AnnotationColor, pdf::Intent};
 use crate::{context, from_enum, Error};
 use crate::{pdf::PdfFilterOptions, Point, Rect};
+use crate::pdf::PdfObject;
 
 from_enum! { pdf_annot_type => c_uint,
     #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,6 +69,12 @@ pub struct PdfAnnotation {
 impl PdfAnnotation {
     pub(crate) unsafe fn from_raw(ptr: *mut pdf_annot) -> Self {
         Self { inner: ptr }
+    }
+
+    /// Returns the underlying PDF object dictionary for this annotation.
+    pub fn obj(&self) -> Result<PdfObject, Error> {
+        let ptr = unsafe { ffi_try!(mupdf_pdf_annot_obj(context(), self.inner)) }?;
+        Ok(unsafe { PdfObject::from_raw_keep_ref(ptr) })
     }
 
     /// Get the [`PdfAnnotationType`] of this annotation

@@ -86,7 +86,36 @@ where
     border_style.dict_put("W", PdfObject::new_int(0)?)?;
     annot.dict_put("BS", border_style)?;
 
-    match &link.action {
+    set_action_on_annot_dict(doc, &mut annot, &link.action, fn_dest_inv_ctm, page_cache)?;
+
+    annot.dict_put_ref("P", page_obj)?;
+
+    Ok(annot)
+}
+
+/// Builds and sets the `/A` action entry on an annotation dictionary from a [`PdfAction`].
+///
+/// Removes any existing `/Dest` entry to avoid conflict with `/A`.
+///
+/// For `GoTo(Page { .. })` destinations, coordinates are transformed from Fitz space
+/// to PDF user space using `fn_dest_inv_ctm`. For `GoToR`, coordinates are used as-is.
+///
+/// This function is used both for creating new annotations (via [`build_link_annotation`])
+/// and for updating existing annotations (via [`PdfAnnotation::set_link_action`]).
+pub(crate) fn set_action_on_annot_dict<F>(
+    doc: &mut PdfDocument,
+    annot: &mut PdfObject,
+    action: &PdfAction,
+    fn_dest_inv_ctm: &mut F,
+    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
+) -> Result<(), Error>
+where
+    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+{
+    // Remove /Dest to avoid conflict with /A
+    let _ = annot.dict_delete("Dest");
+
+    match action {
         PdfAction::GoTo(dest) => match dest {
             PdfDestination::Page { page, kind } => {
                 // MuPDF: GoTo action + explicit destination array
@@ -116,7 +145,7 @@ where
                 let mut action = doc.new_dict_with_capacity(2)?;
                 action.dict_put("S", PdfObject::new_name("GoTo")?)?;
                 action.dict_put("D", dest)?;
-                annot.dict_put("A", action)?;
+                annot.dict_put("A", action)
             }
             PdfDestination::Named(name) => {
                 let mut action = doc.new_dict_with_capacity(2)?;
@@ -125,7 +154,7 @@ where
                 // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1297
                 // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1192
                 action.dict_put("D", PdfObject::new_string(name)?)?;
-                annot.dict_put("A", action)?;
+                annot.dict_put("A", action)
             }
         },
         PdfAction::Uri(uri) => {
@@ -135,7 +164,7 @@ where
             let mut action = doc.new_dict_with_capacity(2)?;
             action.dict_put("S", PdfObject::new_name("URI")?)?;
             action.dict_put("URI", PdfObject::new_string(uri)?)?;
-            annot.dict_put("A", action)?;
+            annot.dict_put("A", action)
         }
         PdfAction::GoToR { file, dest } => {
             // MuPDF: GoToR action uses destination + filespec
@@ -168,7 +197,7 @@ where
             };
 
             action.dict_put("F", file_spec)?;
-            annot.dict_put("A", action)?;
+            annot.dict_put("A", action)
         }
         PdfAction::Launch(file) => {
             // Same as MuPDF `pdf_add_filespec_from_link` function
@@ -182,13 +211,9 @@ where
             let mut action = doc.new_dict_with_capacity(2)?;
             action.dict_put("S", PdfObject::new_name("Launch")?)?;
             action.dict_put("F", file_spec)?;
-            annot.dict_put("A", action)?;
+            annot.dict_put("A", action)
         }
     }
-
-    annot.dict_put_ref("P", page_obj)?;
-
-    Ok(annot)
 }
 
 /// This is the Rust analogue of MuPDF's logic found in `pdf_add_filespec` function

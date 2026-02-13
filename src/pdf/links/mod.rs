@@ -2,11 +2,13 @@
 //!
 //! This module provides PDF-specific link handling built on MuPDF's low-level APIs.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
-use crate::{DestinationKind, Rect};
+use crate::pdf::{PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject};
+use crate::{DestinationKind, Error, Matrix, Rect};
 
 /// Percent-encoding set matching MuPDF's [`URIUNESCAPED`] (RFC 2396 unreserved characters).
 /// Encodes everything except: alphanumeric, `-`, `_`, `.`, `!`, `~`, `*`, `'`, `(`, `)`.
@@ -31,8 +33,10 @@ const URI_PATH_SET: &AsciiSet = &URI_COMPONENT_SET.remove(b'/');
 
 mod build;
 pub(crate) use build::build_link_annotation;
+pub(crate) use build::set_action_on_annot_dict;
 
 mod extraction;
+pub(crate) use extraction::parse_action_from_annot_dict;
 pub(crate) use extraction::parse_external_link;
 
 #[cfg(test)]
@@ -276,6 +280,72 @@ impl fmt::Display for PdfAction {
                 }
             }
         }
+    }
+}
+
+/// Link-specific methods for [`PdfAnnotation`].
+///
+/// These methods are meaningful only on annotations with
+/// [`type()`](PdfAnnotation::r#type) == [`PdfAnnotationType::Link`].
+impl PdfAnnotation {
+    /// Reads the link action from this annotation's dictionary.
+    ///
+    /// Parses `/Dest` (if present) or `/A` action dictionary into a structured [`PdfAction`].
+    /// Returns `Ok(None)` if this is not a Link annotation or has no recognizable action.
+    ///
+    /// Unlike [`PdfPage::pdf_links`](crate::pdf::PdfPage::pdf_links), this method:
+    /// - Does **not** resolve named destinations to page numbers
+    /// - Does **not** transform coordinates from PDF user space to Fitz space
+    /// - Preserves the `Launch(FileSpec::Url)` vs `Uri` distinction
+    pub fn link_action(&self, doc: &PdfDocument) -> Result<Option<PdfAction>, Error> {
+        if self.r#type()? != PdfAnnotationType::Link {
+            return Ok(None);
+        }
+        let obj = self.obj()?;
+        parse_action_from_annot_dict(&obj, doc)
+    }
+
+    /// Replaces the link action on this annotation.
+    ///
+    /// Removes any existing `/Dest` entry and sets the `/A` (Action) dictionary
+    /// based on the provided [`PdfAction`]. All other annotation properties
+    /// (color, border, flags, etc.) are preserved unchanged.
+    ///
+    /// `GoTo` destination coordinates are transformed from Fitz space to PDF
+    /// user space using the destination page's CTM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this annotation is not of type Link.
+    pub fn set_link_action(
+        &mut self,
+        doc: &mut PdfDocument,
+        action: &PdfAction,
+    ) -> Result<(), Error> {
+        self.set_link_action_with_inv_ctm(doc, action, |page_obj| {
+            Ok(page_obj.page_ctm()?.invert())
+        })
+    }
+
+    /// Like [`set_link_action`](Self::set_link_action) but with a caller-provided
+    /// inverse CTM for `GoTo` destination coordinate transformation.
+    ///
+    /// This mirrors the `dest_inv_ctm` callback in
+    /// [`PdfPage::add_links_with_inv_ctm`](crate::pdf::PdfPage::add_links_with_inv_ctm).
+    pub fn set_link_action_with_inv_ctm(
+        &mut self,
+        doc: &mut PdfDocument,
+        action: &PdfAction,
+        mut dest_inv_ctm: impl FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+    ) -> Result<(), Error> {
+        if self.r#type()? != PdfAnnotationType::Link {
+            return Err(Error::InvalidDestination(
+                "set_link_action called on non-Link annotation".into(),
+            ));
+        }
+        let mut obj = self.obj()?;
+        let mut page_cache: HashMap<u32, (PdfObject, Option<Matrix>)> = HashMap::new();
+        set_action_on_annot_dict(doc, &mut obj, action, &mut dest_inv_ctm, &mut page_cache)
     }
 }
 

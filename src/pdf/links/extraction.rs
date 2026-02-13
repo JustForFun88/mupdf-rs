@@ -2,7 +2,8 @@ use percent_encoding::percent_decode_str;
 use std::borrow::Cow;
 
 use super::{FileSpec, PdfAction, PdfDestination};
-use crate::DestinationKind;
+use crate::pdf::{PdfDocument, PdfObject};
+use crate::{DestinationKind, Error};
 
 /// Parses a [MuPDF-compatible] link URI string into a structured [`PdfAction`] based on the Adobe
 /// specification ["Parameters for Opening PDF Files"] from the Adobe Acrobat SDK, version 8.1.
@@ -473,4 +474,203 @@ pub(super) fn decode_uri_component(s: &str) -> Cow<'_, str> {
     percent_decode_str(s)
         .decode_utf8()
         .unwrap_or(Cow::Borrowed(s))
+}
+
+/// Parses a [`PdfAction`] from a link annotation's PDF dictionary, without
+/// going through MuPDF's lossy URI intermediate format.
+///
+/// Reading priority (matching [`pdf_load_link`] in MuPDF):
+/// 1. `/Dest` entry -> `GoTo` destination
+/// 2. `/A` (Action) dictionary -> dispatch by `/S` type
+/// 3. `/AA` (Additional Actions) -> `/U` then `/D`
+///
+/// For `GoTo(Page { .. })`, the page number is resolved from the indirect
+/// page reference using [`PdfDocument::lookup_page_number`]. Coordinates
+/// are in PDF user space (no CTM applied).
+///
+/// [`pdf_load_link`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L652
+pub(crate) fn parse_action_from_annot_dict(
+    obj: &PdfObject,
+    doc: &PdfDocument,
+) -> Result<Option<PdfAction>, Error> {
+    // 1. Check /Dest entry first (per PDF spec priority)
+    if let Some(dest_obj) = obj.get_dict("Dest")? {
+        return parse_dest_value(&dest_obj, doc).map(|d| d.map(PdfAction::GoTo));
+    }
+
+    // 2. Check /A (Action) entry
+    if let Some(action_obj) = obj.get_dict("A")? {
+        return parse_action_dict(&action_obj, doc);
+    }
+
+    // 3. Check /AA (Additional Actions) - U (mouse-up) then D (mouse-down)
+    if let Some(aa) = obj.get_dict("AA")? {
+        if let Some(u) = aa.get_dict("U")? {
+            return parse_action_dict(&u, doc);
+        }
+        if let Some(d) = aa.get_dict("D")? {
+            return parse_action_dict(&d, doc);
+        }
+    }
+
+    Ok(None)
+}
+
+/// Parses a `/Dest` value, which can be either a name/string (named dest)
+/// or an array (explicit dest).
+fn parse_dest_value(
+    dest: &PdfObject,
+    doc: &PdfDocument,
+) -> Result<Option<PdfDestination>, Error> {
+    if dest.is_string()? || dest.is_name()? {
+        let name = if dest.is_string()? {
+            dest.as_string()?.to_owned()
+        } else {
+            std::str::from_utf8(dest.as_name()?)
+                .map_err(|_| Error::InvalidUtf8)?
+                .to_owned()
+        };
+        return Ok(Some(PdfDestination::Named(name)));
+    }
+
+    if dest.is_array()? {
+        return parse_dest_array(dest, doc).map(Some);
+    }
+
+    Ok(None)
+}
+
+/// Parses a PDF destination array `[page_ref, /Kind, params...]` into a
+/// [`PdfDestination::Page`].
+fn parse_dest_array(
+    array: &PdfObject,
+    doc: &PdfDocument,
+) -> Result<PdfDestination, Error> {
+    let page_obj = array
+        .get_array(0)?
+        .ok_or_else(|| Error::InvalidDestination("missing page reference in dest array".into()))?;
+
+    let page = if page_obj.is_int()? {
+        // Remote destinations use integer page numbers
+        page_obj.as_int()? as u32
+    } else {
+        // Local destinations use indirect page object references
+        doc.lookup_page_number(&page_obj)? as u32
+    };
+
+    let kind = DestinationKind::decode_from(array)?;
+
+    Ok(PdfDestination::Page { page, kind })
+}
+
+/// Dispatches on the `/S` (action type) entry of an action dictionary.
+fn parse_action_dict(
+    action: &PdfObject,
+    doc: &PdfDocument,
+) -> Result<Option<PdfAction>, Error> {
+    let s_obj = match action.get_dict("S")? {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    let s_name = std::str::from_utf8(s_obj.as_name()?)
+        .map_err(|_| Error::InvalidUtf8)?;
+
+    match s_name {
+        "GoTo" => {
+            let d = match action.get_dict("D")? {
+                Some(d) => d,
+                None => return Ok(None),
+            };
+            let dest = parse_dest_value(&d, doc)?;
+            Ok(dest.map(PdfAction::GoTo))
+        }
+        "URI" => {
+            let uri_obj = match action.get_dict("URI")? {
+                Some(u) => u,
+                None => return Ok(None),
+            };
+            Ok(Some(PdfAction::Uri(uri_obj.as_string()?.to_owned())))
+        }
+        "GoToR" => {
+            let file = match action.get_dict("F")? {
+                Some(f) => parse_filespec(&f)?,
+                None => return Ok(None),
+            };
+            let dest = match action.get_dict("D")? {
+                Some(d) => {
+                    if d.is_string()? || d.is_name()? {
+                        let name = if d.is_string()? {
+                            d.as_string()?.to_owned()
+                        } else {
+                            std::str::from_utf8(d.as_name()?)
+                                .map_err(|_| Error::InvalidUtf8)?
+                                .to_owned()
+                        };
+                        PdfDestination::Named(name)
+                    } else if d.is_array()? {
+                        // Remote dest arrays use integer page numbers
+                        let page_obj = d.get_array(0)?
+                            .ok_or_else(|| Error::InvalidDestination(
+                                "missing page in GoToR dest".into(),
+                            ))?;
+                        let page = page_obj.as_int()? as u32;
+                        let kind = DestinationKind::decode_from(&d)?;
+                        PdfDestination::Page { page, kind }
+                    } else {
+                        PdfDestination::default()
+                    }
+                }
+                None => PdfDestination::default(),
+            };
+            Ok(Some(PdfAction::GoToR { file, dest }))
+        }
+        "Launch" => {
+            let file = match action.get_dict("F")? {
+                Some(f) => parse_filespec(&f)?,
+                None => return Ok(None),
+            };
+            Ok(Some(PdfAction::Launch(file)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Parses a PDF file specification object into a [`FileSpec`].
+///
+/// Handles both dictionary-form and string-form file specifications:
+/// - Dict with `/FS` = `"URL"` -> `FileSpec::Url`
+/// - Dict with `/UF` (Unicode) -> `FileSpec::Path` (preferred)
+/// - Dict with `/F` -> `FileSpec::Path`
+/// - Plain string -> `FileSpec::Path`
+fn parse_filespec(obj: &PdfObject) -> Result<FileSpec, Error> {
+    if obj.is_dict()? {
+        // Check if it's a URL-based file spec
+        if let Some(fs) = obj.get_dict("FS")? {
+            if fs.is_name()? {
+                let name = std::str::from_utf8(fs.as_name()?)
+                    .map_err(|_| Error::InvalidUtf8)?;
+                if name == "URL" {
+                    if let Some(f) = obj.get_dict("F")? {
+                        return Ok(FileSpec::Url(f.as_string()?.to_owned()));
+                    }
+                }
+            }
+        }
+        // Prefer /UF (Unicode filename) over /F (ASCII filename)
+        if let Some(uf) = obj.get_dict("UF")? {
+            return Ok(FileSpec::Path(uf.as_string()?.to_owned()));
+        }
+        if let Some(f) = obj.get_dict("F")? {
+            return Ok(FileSpec::Path(f.as_string()?.to_owned()));
+        }
+        Err(Error::InvalidDestination(
+            "file specification dict has no /F or /UF entry".into(),
+        ))
+    } else if obj.is_string()? {
+        Ok(FileSpec::Path(obj.as_string()?.to_owned()))
+    } else {
+        Err(Error::InvalidDestination(
+            "invalid file specification object".into(),
+        ))
+    }
 }

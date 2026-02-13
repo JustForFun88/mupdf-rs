@@ -365,6 +365,79 @@ impl DestinationKind {
             }
         }
     }
+
+    /// Decodes a PDF destination array into a `DestinationKind`.
+    ///
+    /// The `array` should be the full destination array `[page, /Name, params...]`.
+    /// This reads from index 1 onward (skipping the page reference at index 0).
+    /// Coordinates are returned as-is in PDF user space (no CTM applied).
+    ///
+    /// This is the inverse of [`encode_into`](Self::encode_into).
+    pub fn decode_from(array: &PdfObject) -> Result<DestinationKind, Error> {
+        let kind_obj = array
+            .get_array(1)?
+            .ok_or_else(|| Error::InvalidDestination("missing destination type name".into()))?;
+        let kind_name = std::str::from_utf8(kind_obj.as_name()?)
+            .map_err(|_| Error::InvalidDestination("invalid UTF-8 in destination name".into()))?;
+
+        /// Read a float from an array index, returning None if the element
+        /// is null/missing.
+        fn read_optional_float(array: &PdfObject, idx: i32) -> Result<Option<f32>, Error> {
+            match array.get_array(idx)? {
+                Some(obj) => {
+                    if obj.is_null()? {
+                        Ok(None)
+                    } else {
+                        Ok(Some(obj.as_float()?))
+                    }
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn read_float(array: &PdfObject, idx: i32) -> Result<f32, Error> {
+            array
+                .get_array(idx)?
+                .ok_or_else(|| {
+                    Error::InvalidDestination(format!("missing required float at index {idx}"))
+                })?
+                .as_float()
+        }
+
+        match kind_name {
+            "Fit" => Ok(DestinationKind::Fit),
+            "FitB" => Ok(DestinationKind::FitB),
+            "FitH" => Ok(DestinationKind::FitH {
+                top: read_optional_float(array, 2)?,
+            }),
+            "FitBH" => Ok(DestinationKind::FitBH {
+                top: read_optional_float(array, 2)?,
+            }),
+            "FitV" => Ok(DestinationKind::FitV {
+                left: read_optional_float(array, 2)?,
+            }),
+            "FitBV" => Ok(DestinationKind::FitBV {
+                left: read_optional_float(array, 2)?,
+            }),
+            "XYZ" => {
+                let left = read_optional_float(array, 2)?;
+                let top = read_optional_float(array, 3)?;
+                // PDF /XYZ stores zoom as a scale factor (1.0 = 100%).
+                // DestinationKind stores it as a percentage (100.0 = 100%).
+                let zoom = read_optional_float(array, 4)?.map(|z| z * 100.0);
+                Ok(DestinationKind::XYZ { left, top, zoom })
+            }
+            "FitR" => Ok(DestinationKind::FitR {
+                left: read_float(array, 2)?,
+                bottom: read_float(array, 3)?,
+                right: read_float(array, 4)?,
+                top: read_float(array, 5)?,
+            }),
+            _ => Err(Error::InvalidDestination(format!(
+                "unknown destination type: {kind_name}"
+            ))),
+        }
+    }
 }
 
 impl Default for DestinationKind {
