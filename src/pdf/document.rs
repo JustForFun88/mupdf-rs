@@ -525,7 +525,13 @@ impl PdfDocument {
 
     /// Given a page object reference, returns its zero-based page number.
     pub fn lookup_page_number(&self, page_obj: &PdfObject) -> Result<i32, Error> {
-        unsafe { ffi_try!(mupdf_pdf_lookup_page_number(context(), self.inner, page_obj.inner)) }
+        unsafe {
+            ffi_try!(mupdf_pdf_lookup_page_number(
+                context(),
+                self.inner,
+                page_obj.inner
+            ))
+        }
     }
 
     /// Loads a PdfPage from a page index.

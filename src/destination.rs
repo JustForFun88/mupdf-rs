@@ -175,13 +175,6 @@ impl DestinationKind {
     ///
     /// Ported from [`pdf_new_dest_from_link`] in MuPDF (`pdf/pdf-link.c`).
     pub fn transform(self, matrix: &Matrix) -> Self {
-        // Helper function, similar to `fz_transform_point_xy` from C. Performs bare math without checking for NaN.
-        // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/fitz/geometry.c#L344
-        #[inline(always)]
-        fn transform_xy(m: &Matrix, x: f32, y: f32) -> (f32, f32) {
-            (x * m.a + y * m.c + m.e, x * m.b + y * m.d + m.f)
-        }
-
         match self {
             Self::Fit => Self::Fit,
             Self::FitB => Self::FitB,
@@ -191,25 +184,25 @@ impl DestinationKind {
             // write NULL if isnan(p.y). Here we only do the transform, `null`
             // emission should be done in encode step.
             Self::FitH { top } => {
-                let top = top.map(|t| transform_xy(matrix, 0.0, t).1);
+                let top = top.map(|t| matrix.transform_xy(0.0, t).1);
                 Self::FitH { top }
             }
 
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1345
             Self::FitBH { top } => {
-                let top = top.map(|t| transform_xy(matrix, 0.0, t).1);
+                let top = top.map(|t| matrix.transform_xy(0.0, t).1);
                 Self::FitBH { top }
             }
 
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1353
             Self::FitV { left } => {
-                let left = left.map(|l| transform_xy(matrix, l, 0.0).0);
+                let left = left.map(|l| matrix.transform_xy(l, 0.0).0);
                 Self::FitV { left }
             }
 
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1361
             Self::FitBV { left } => {
-                let left = left.map(|l| transform_xy(matrix, l, 0.0).0);
+                let left = left.map(|l| matrix.transform_xy(l, 0.0).0);
                 Self::FitBV { left }
             }
 
@@ -219,19 +212,19 @@ impl DestinationKind {
             Self::XYZ { left, top, zoom } => {
                 let (left, top) = if matrix.a == 0.0 && matrix.d == 0.0 {
                     // Rotating by 90 or 270 degrees
-                    let (tx, ty) = transform_xy(matrix, left.unwrap_or(0.0), top.unwrap_or(0.0));
+                    let (tx, ty) = matrix.transform_xy(left.unwrap_or(0.0), top.unwrap_or(0.0));
 
                     // MuPDF: if isnan(val.x) p.y = val.x / if isnan(val.y) p.x = val.y;
                     (top.and(Some(tx)), left.and(Some(ty)))
                 } else if matrix.b == 0.0 && matrix.c == 0.0 {
                     // No rotation, or 180 degrees
-                    let (tx, ty) = transform_xy(matrix, left.unwrap_or(0.0), top.unwrap_or(0.0));
+                    let (tx, ty) = matrix.transform_xy(left.unwrap_or(0.0), top.unwrap_or(0.0));
 
                     // MuPDF: if isnan(val.x) p.x = val.x / if isnan(val.y) p.y = val.y;
                     (left.and(Some(tx)), top.and(Some(ty)))
                 } else {
                     let (tx, ty) =
-                        transform_xy(matrix, left.unwrap_or(f32::NAN), top.unwrap_or(f32::NAN));
+                        matrix.transform_xy(left.unwrap_or(f32::NAN), top.unwrap_or(f32::NAN));
                     (not_nan(tx), not_nan(ty))
                 };
 
@@ -377,11 +370,10 @@ impl DestinationKind {
         let kind_obj = array
             .get_array(1)?
             .ok_or_else(|| Error::InvalidDestination("missing destination type name".into()))?;
-        let kind_name = std::str::from_utf8(kind_obj.as_name()?)
-            .map_err(|_| Error::InvalidDestination("invalid UTF-8 in destination name".into()))?;
+        let kind_name = kind_obj.as_name()?;
 
-        /// Read a float from an array index, returning None if the element
-        /// is null/missing.
+        /// Read a float from an array index, returning None if the element is null/missing.
+        #[inline(always)]
         fn read_optional_float(array: &PdfObject, idx: i32) -> Result<Option<f32>, Error> {
             match array.get_array(idx)? {
                 Some(obj) => {
@@ -395,6 +387,7 @@ impl DestinationKind {
             }
         }
 
+        #[inline(always)]
         fn read_float(array: &PdfObject, idx: i32) -> Result<f32, Error> {
             array
                 .get_array(idx)?
@@ -404,39 +397,37 @@ impl DestinationKind {
                 .as_float()
         }
 
-        match kind_name {
-            "Fit" => Ok(DestinationKind::Fit),
-            "FitB" => Ok(DestinationKind::FitB),
-            "FitH" => Ok(DestinationKind::FitH {
+        let destination_kind = match kind_name {
+            b"Fit" => DestinationKind::Fit,
+            b"FitB" => DestinationKind::FitB,
+            b"FitH" => DestinationKind::FitH {
                 top: read_optional_float(array, 2)?,
-            }),
-            "FitBH" => Ok(DestinationKind::FitBH {
+            },
+            b"FitBH" => DestinationKind::FitBH {
                 top: read_optional_float(array, 2)?,
-            }),
-            "FitV" => Ok(DestinationKind::FitV {
+            },
+            b"FitV" => DestinationKind::FitV {
                 left: read_optional_float(array, 2)?,
-            }),
-            "FitBV" => Ok(DestinationKind::FitBV {
+            },
+            b"FitBV" => DestinationKind::FitBV {
                 left: read_optional_float(array, 2)?,
-            }),
-            "XYZ" => {
-                let left = read_optional_float(array, 2)?;
-                let top = read_optional_float(array, 3)?;
-                // PDF /XYZ stores zoom as a scale factor (1.0 = 100%).
-                // DestinationKind stores it as a percentage (100.0 = 100%).
-                let zoom = read_optional_float(array, 4)?.map(|z| z * 100.0);
-                Ok(DestinationKind::XYZ { left, top, zoom })
-            }
-            "FitR" => Ok(DestinationKind::FitR {
+            },
+            b"FitR" => DestinationKind::FitR {
                 left: read_float(array, 2)?,
                 bottom: read_float(array, 3)?,
                 right: read_float(array, 4)?,
                 top: read_float(array, 5)?,
-            }),
-            _ => Err(Error::InvalidDestination(format!(
-                "unknown destination type: {kind_name}"
-            ))),
-        }
+            },
+            _ => DestinationKind::XYZ {
+                left: read_optional_float(array, 2)?,
+                top: read_optional_float(array, 3)?,
+                // PDF /XYZ stores zoom as a scale factor (1.0 = 100%).
+                // DestinationKind stores it as a percentage (100.0 = 100%).
+                zoom: read_optional_float(array, 4)?
+                    .map(|z| if z > 0.0 { z * 100.0 } else { 100.0 }),
+            },
+        };
+        Ok(destination_kind)
     }
 }
 

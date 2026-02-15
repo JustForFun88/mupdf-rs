@@ -322,9 +322,7 @@ impl PdfAnnotation {
         doc: &mut PdfDocument,
         action: &PdfAction,
     ) -> Result<(), Error> {
-        self.set_link_action_with_inv_ctm(doc, action, |page_obj| {
-            Ok(page_obj.page_ctm()?.invert())
-        })
+        self.set_link_action_with_inv_ctm(doc, action, |page_obj| Ok(page_obj.page_ctm()?.invert()))
     }
 
     /// Like [`set_link_action`](Self::set_link_action) but with a caller-provided
