@@ -293,16 +293,25 @@ impl PdfAnnotation {
     /// Parses `/Dest` (if present) or `/A` action dictionary into a structured [`PdfAction`].
     /// Returns `Ok(None)` if this is not a Link annotation or has no recognizable action.
     ///
+    /// `page_num` is the 0-based page number where this annotation lives, used to
+    /// resolve relative `Named` actions (`PrevPage`, `NextPage`). Pass `None` if
+    /// the page number is unknown; absolute named actions (`FirstPage`, `LastPage`)
+    /// will still be resolved.
+    ///
     /// Unlike [`PdfPage::pdf_links`](crate::pdf::PdfPage::pdf_links), this method:
     /// - Does **not** resolve named destinations to page numbers
     /// - Does **not** transform coordinates from PDF user space to Fitz space
     /// - Preserves the `Launch(FileSpec::Url)` vs `Uri` distinction
-    pub fn link_action(&self, doc: &PdfDocument) -> Result<Option<PdfAction>, Error> {
+    pub fn link_action(
+        &self,
+        doc: &PdfDocument,
+        page_num: Option<i32>,
+    ) -> Result<Option<PdfAction>, Error> {
         if self.r#type()? != PdfAnnotationType::Link {
             return Ok(None);
         }
         let obj = self.obj()?;
-        parse_action_from_annot_dict(&obj, doc)
+        parse_action_from_annot_dict(&obj, doc, page_num)
     }
 
     /// Replaces the link action on this annotation.

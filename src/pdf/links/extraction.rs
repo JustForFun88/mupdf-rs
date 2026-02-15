@@ -493,6 +493,7 @@ pub(super) fn decode_uri_component(s: &str) -> Cow<'_, str> {
 pub(crate) fn parse_action_from_annot_dict(
     obj: &PdfObject,
     doc: &PdfDocument,
+    page_num: Option<i32>,
 ) -> Result<Option<PdfAction>, Error> {
     // 1. Check /Dest entry first (per PDF spec priority)
     if let Some(dest_obj) = obj.get_dict("Dest")? {
@@ -501,17 +502,17 @@ pub(crate) fn parse_action_from_annot_dict(
 
     // 2. Check /A (Action) entry
     if let Some(action_obj) = obj.get_dict("A")? {
-        return parse_action_dict(&action_obj, doc);
+        return parse_action_dict(&action_obj, doc, page_num);
     }
 
     // 3. Check /AA (Additional Actions) - U (mouse-up) then D (mouse-down)
     if let Some(add_action_obj) = obj.get_dict("AA")? {
         /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precedence. */
         if let Some(d) = add_action_obj.get_dict("D")? {
-            return parse_action_dict(&d, doc);
+            return parse_action_dict(&d, doc, page_num);
         }
         if let Some(u) = add_action_obj.get_dict("U")? {
-            return parse_action_dict(&u, doc);
+            return parse_action_dict(&u, doc, page_num);
         }
     }
 
@@ -604,7 +605,17 @@ fn parse_dest_array(array: &PdfObject, doc: &PdfDocument) -> Result<PdfDestinati
 }
 
 /// Dispatches on the `/S` (action type) entry of an action dictionary.
-fn parse_action_dict(action: &PdfObject, doc: &PdfDocument) -> Result<Option<PdfAction>, Error> {
+///
+/// `page_num` is the 0-based page number of the annotation's page, used to
+/// resolve relative `Named` actions (`PrevPage`, `NextPage`). When `None`,
+/// only absolute named actions (`FirstPage`, `LastPage`) can be resolved.
+///
+/// MuPDF: [`pdf_parse_link_action`](https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L519)
+fn parse_action_dict(
+    action: &PdfObject,
+    doc: &PdfDocument,
+    page_num: Option<i32>,
+) -> Result<Option<PdfAction>, Error> {
     let Some(type_obj) = action.get_dict("S")? else {
         return Ok(None);
     };
@@ -656,6 +667,29 @@ fn parse_action_dict(action: &PdfObject, doc: &PdfDocument) -> Result<Option<Pdf
             Some(f) => Ok(Some(PdfAction::Launch(parse_filespec(&f)?))),
             None => Ok(None),
         },
+        // Named action (S=Named): navigates to a well-known page using the /N entry.
+        // MuPDF: pdf_parse_link_action, lines 558-580
+        // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L558
+        b"Named" => {
+            let Some(dest_obj) = action.get_dict("N")? else {
+                return Ok(None);
+            };
+            let total = doc.page_count()?;
+            let target = match dest_obj.as_name()? {
+                b"FirstPage" => Some(0),
+                b"LastPage" => Some((total - 1).max(0)),
+                b"PrevPage" => page_num.map(|p| (p - 1).max(0)),
+                b"NextPage" => page_num.map(|p| (p + 1).min(total - 1)),
+                _ => return Ok(None),
+            };
+            let Some(page) = target else {
+                return Ok(None);
+            };
+            Ok(Some(PdfAction::GoTo(PdfDestination::Page {
+                page: page as u32,
+                kind: DestinationKind::default(),
+            })))
+        }
         _ => Ok(None),
     }
 }
