@@ -218,7 +218,7 @@ where
 
 /// This is the Rust analogue of MuPDF's logic found in `pdf_add_filespec` function
 /// (<https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1223>).
-fn build_filespec(doc: &PdfDocument, file: &str) -> Result<PdfObject, Error> {
+fn build_filespec(doc: &mut PdfDocument, file: &str) -> Result<PdfObject, Error> {
     let mut spec = doc.new_dict_with_capacity(3)?;
     spec.dict_put("Type", PdfObject::new_name("Filespec")?)?;
     let asciiname: String = file
@@ -227,15 +227,17 @@ fn build_filespec(doc: &PdfDocument, file: &str) -> Result<PdfObject, Error> {
         .collect();
     spec.dict_put("F", PdfObject::new_string(&asciiname)?)?;
     spec.dict_put("UF", PdfObject::new_string(file)?)?;
-    Ok(spec)
+    // MuPDF uses pdf_add_new_dict which creates an indirect object (pdf-link.c:1249)
+    doc.add_object(&spec)
 }
 
 /// This is the Rust analogue of MuPDF's logic found in `pdf_add_url_filespec` function
 /// (<https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1268>).
-fn build_url_filespec(doc: &PdfDocument, file: &str) -> Result<PdfObject, Error> {
+fn build_url_filespec(doc: &mut PdfDocument, file: &str) -> Result<PdfObject, Error> {
     let mut spec = doc.new_dict_with_capacity(3)?;
     spec.dict_put("Type", PdfObject::new_name("Filespec")?)?;
     spec.dict_put("FS", PdfObject::new_name("URL")?)?;
     spec.dict_put("F", PdfObject::new_string(file)?)?;
-    Ok(spec)
+    // MuPDF uses pdf_add_new_dict which creates an indirect object (pdf-link.c:1268)
+    doc.add_object(&spec)
 }

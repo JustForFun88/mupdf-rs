@@ -573,7 +573,9 @@ fn parse_dest_array(array: &PdfObject, doc: &PdfDocument) -> Result<PdfDestinati
                 left: left.map(|l| ctm.transform_xy(l, 0.0).0),
             },
             DestinationKind::XYZ { left, top, zoom } => {
-                let (tx, ty) = ctm.transform_xy(left.unwrap_or(f32::NAN), top.unwrap_or(f32::NAN));
+                // MuPDF uses 0.0 for missing values before transform, then
+                // checks original presence afterward (pdf-link.c:137-141).
+                let (tx, ty) = ctm.transform_xy(left.unwrap_or(0.0), top.unwrap_or(0.0));
                 DestinationKind::XYZ {
                     left: left.and(not_nan(tx)),
                     top: top.and(not_nan(ty)),
@@ -586,12 +588,13 @@ fn parse_dest_array(array: &PdfObject, doc: &PdfDocument) -> Result<PdfDestinati
                 right,
                 top,
             } => {
+                // Explicit normalization matching pdf-link.c:149-152
                 let tr = Rect::new(left, bottom, right, top).transform(&ctm);
                 DestinationKind::FitR {
-                    left: tr.x0,
-                    bottom: tr.y0,
-                    right: tr.x1,
-                    top: tr.y1,
+                    left: tr.x0.min(tr.x1),
+                    bottom: tr.y0.min(tr.y1),
+                    right: tr.x0.max(tr.x1),
+                    top: tr.y0.max(tr.y1),
                 }
             }
             kind => kind,
@@ -632,7 +635,23 @@ fn parse_action_dict(
             let Some(uri_obj) = action.get_dict("URI")? else {
                 return Ok(None);
             };
-            Ok(Some(PdfAction::Uri(uri_obj.as_string()?.to_owned())))
+            let uri = uri_obj.as_string()?.to_owned();
+            // MuPDF prepends the document URI base for non-external URIs.
+            // pdf-link.c:536-543
+            if is_external_link(&uri) {
+                Ok(Some(PdfAction::Uri(uri)))
+            } else {
+                let base = doc
+                    .trailer()?
+                    .get_dict("Root")?
+                    .and_then(|root| root.get_dict("URI").ok().flatten())
+                    .and_then(|uri_dict| uri_dict.get_dict("Base").ok().flatten())
+                    .and_then(|base_obj| base_obj.as_string().ok().map(|s| s.to_owned()));
+                let mut full_uri = base.unwrap_or_else(|| "file://".to_owned());
+                full_uri.reserve(uri.len());
+                full_uri.push_str(&uri);
+                Ok(Some(PdfAction::Uri(full_uri)))
+            }
         }
         b"GoToR" => {
             let file = match action.get_dict("F")? {
