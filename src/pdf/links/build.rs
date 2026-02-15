@@ -1,7 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use super::{FileSpec, PdfAction, PdfDestination, PdfLink};
+use super::{FileSpec, LinkAction, PdfAction, PdfDestination, PdfLink};
 use crate::pdf::{PdfDocument, PdfObject};
 use crate::{Error, Matrix};
 
@@ -86,7 +86,7 @@ where
     border_style.dict_put("W", PdfObject::new_int(0)?)?;
     annot.dict_put("BS", border_style)?;
 
-    set_action_on_annot_dict(doc, &mut annot, &link.action, fn_dest_inv_ctm, page_cache)?;
+    set_link_action_on_annot_dict(doc, &mut annot, &link.action, fn_dest_inv_ctm, page_cache)?;
 
     annot.dict_put_ref("P", page_obj)?;
 
@@ -213,6 +213,77 @@ where
             action.dict_put("F", file_spec)?;
             annot.dict_put("A", action)
         }
+    }
+}
+
+/// Dispatches a [`LinkAction`] to the appropriate builder function.
+///
+/// - [`LinkAction::Dest`] -> [`set_dest_on_annot_dict`] (writes `/Dest`, removes `/A`)
+/// - [`LinkAction::Action`] -> [`set_action_on_annot_dict`] (writes `/A`, removes `/Dest`)
+pub(crate) fn set_link_action_on_annot_dict<F>(
+    doc: &mut PdfDocument,
+    annot: &mut PdfObject,
+    action: &LinkAction,
+    fn_dest_inv_ctm: &mut F,
+    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
+) -> Result<(), Error>
+where
+    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+{
+    match action {
+        LinkAction::Dest(dest) => {
+            set_dest_on_annot_dict(doc, annot, dest, fn_dest_inv_ctm, page_cache)
+        }
+        LinkAction::Action(pdf_action) => {
+            set_action_on_annot_dict(doc, annot, pdf_action, fn_dest_inv_ctm, page_cache)
+        }
+    }
+}
+
+/// Builds and sets the `/Dest` entry on an annotation dictionary from a [`PdfDestination`].
+///
+/// Removes any existing `/A` entry to avoid conflict with `/Dest`
+/// (per PDF 32000-1:2008, Table 173).
+///
+/// For `Page { .. }` destinations, coordinates are transformed from Fitz space
+/// to PDF user space using `fn_dest_inv_ctm`. Named destinations are stored as-is.
+fn set_dest_on_annot_dict<F>(
+    doc: &mut PdfDocument,
+    annot: &mut PdfObject,
+    dest: &PdfDestination,
+    fn_dest_inv_ctm: &mut F,
+    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
+) -> Result<(), Error>
+where
+    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+{
+    // Remove /A to avoid conflict with /Dest
+    let _ = annot.dict_delete("A");
+
+    match dest {
+        PdfDestination::Page { page, kind } => {
+            let mut dest = doc.new_array_with_capacity(6)?;
+
+            let (dest_page_obj, dest_inv_ctm) = match page_cache.entry(*page) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let page_obj = doc.find_page(*page as i32)?;
+                    let inv_ctm = fn_dest_inv_ctm(&page_obj)?;
+                    entry.insert((page_obj, inv_ctm))
+                }
+            };
+
+            dest.array_push_ref(dest_page_obj)?;
+
+            let dest_kind = dest_inv_ctm
+                .as_ref()
+                .map(|inv_ctm| kind.transform(inv_ctm))
+                .unwrap_or(*kind);
+            dest_kind.encode_into(&mut dest)?;
+
+            annot.dict_put("Dest", dest)
+        }
+        PdfDestination::Named(name) => annot.dict_put("Dest", PdfObject::new_string(name)?),
     }
 }
 
