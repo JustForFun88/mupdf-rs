@@ -1,7 +1,7 @@
 use percent_encoding::percent_decode_str;
 use std::borrow::Cow;
 
-use super::{FileSpec, PdfAction, PdfDestination};
+use super::{FileSpec, LinkAction, PdfAction, PdfDestination};
 use crate::destination::not_nan;
 use crate::pdf::{PdfDocument, PdfObject};
 use crate::{DestinationKind, Error, Rect};
@@ -477,42 +477,43 @@ pub(super) fn decode_uri_component(s: &str) -> Cow<'_, str> {
         .unwrap_or(Cow::Borrowed(s))
 }
 
-/// Parses a [`PdfAction`] from a link annotation's PDF dictionary, without
-/// going through MuPDF's lossy URI intermediate format.
+/// Parses a [`LinkAction`] from a link annotation's PDF dictionary, preserving
+/// whether the original entry was `/Dest` or `/A`.
 ///
 /// Reading priority (matching [`pdf_load_link`] in MuPDF):
-/// 1. `/Dest` entry -> `GoTo` destination
-/// 2. `/A` (Action) dictionary -> dispatch by `/S` type
-/// 3. `/AA` (Additional Actions) ->  `/D` then `/U`
+/// 1. `/Dest` entry -> `LinkAction::Dest(destination)`
+/// 2. `/A` (Action) dictionary -> `LinkAction::Action(action)`
+/// 3. `/AA` (Additional Actions) -> `LinkAction::Action(action)`
 ///
-/// For `GoTo(Page { .. })`, the page number is resolved from the indirect
+/// For `Page { .. }` destinations, the page number is resolved from the indirect
 /// page reference using [`PdfDocument::lookup_page_number`]. Coordinates
-/// are in PDF user space (no CTM applied).
+/// are in Fitz coordinate space.
 ///
 /// [`pdf_load_link`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L652
-pub(crate) fn parse_action_from_annot_dict(
+pub(crate) fn parse_link_action_from_annot_dict(
     obj: &PdfObject,
     doc: &PdfDocument,
     page_num: Option<i32>,
-) -> Result<Option<PdfAction>, Error> {
+) -> Result<Option<LinkAction>, Error> {
     // 1. Check /Dest entry first (per PDF spec priority)
     if let Some(dest_obj) = obj.get_dict("Dest")? {
-        return parse_dest_value(&dest_obj, doc).map(|dest| dest.map(PdfAction::GoTo));
+        return parse_dest_value(&dest_obj, doc).map(|dest| dest.map(LinkAction::Dest));
     }
 
     // 2. Check /A (Action) entry
     if let Some(action_obj) = obj.get_dict("A")? {
-        return parse_action_dict(&action_obj, doc, page_num);
+        return parse_action_dict(&action_obj, doc, page_num)
+            .map(|opt| opt.map(LinkAction::Action));
     }
 
     // 3. Check /AA (Additional Actions) - U (mouse-up) then D (mouse-down)
     if let Some(add_action_obj) = obj.get_dict("AA")? {
         /* ISO 32000-2:2020 (PDF 2.0) - abbreviated names take precedence. */
         if let Some(d) = add_action_obj.get_dict("D")? {
-            return parse_action_dict(&d, doc, page_num);
+            return parse_action_dict(&d, doc, page_num).map(|opt| opt.map(LinkAction::Action));
         }
         if let Some(u) = add_action_obj.get_dict("U")? {
-            return parse_action_dict(&u, doc, page_num);
+            return parse_action_dict(&u, doc, page_num).map(|opt| opt.map(LinkAction::Action));
         }
     }
 

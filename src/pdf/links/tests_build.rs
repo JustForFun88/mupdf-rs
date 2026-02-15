@@ -75,7 +75,7 @@ impl<T: IntoIterator<Item = PdfAction>> LinksCreator for T {
     fn create_links(self) -> Vec<PdfLink> {
         let create_link = |(idx, action)| PdfLink {
             bounds: test_link_rect(idx),
-            action,
+            action: LinkAction::Action(action),
         };
         self.into_iter().enumerate().map(create_link).collect()
     }
@@ -142,7 +142,10 @@ impl PdfPage {
                     None => continue,
                 };
                 let bounds = (*node).rect.into();
-                output.push(PdfLink { bounds, action });
+                output.push(PdfLink {
+                    bounds,
+                    action: action.into(),
+                });
             }
         }
 
@@ -764,14 +767,14 @@ fn test_rotated_source_page() {
         let links = vec![
             PdfLink {
                 bounds: link_bounds,
-                action: PdfAction::GoTo(PdfDestination::Page {
+                action: LinkAction::Action(PdfAction::GoTo(PdfDestination::Page {
                     page: 1,
                     kind: DestinationKind::XYZ {
                         left: Some(50.0),
                         top: Some(400.0),
                         zoom: Some(100.0),
                     },
-                }),
+                })),
             },
             PdfLink {
                 bounds: Rect {
@@ -780,10 +783,10 @@ fn test_rotated_source_page() {
                     x1: link_bounds.x1,
                     y1: link_bounds.y1 + 15.0,
                 },
-                action: PdfAction::GoTo(PdfDestination::Page {
+                action: LinkAction::Action(PdfAction::GoTo(PdfDestination::Page {
                     page: 1,
                     kind: DestinationKind::Fit,
-                }),
+                })),
             },
             PdfLink {
                 bounds: Rect {
@@ -792,10 +795,10 @@ fn test_rotated_source_page() {
                     x1: link_bounds.x1,
                     y1: link_bounds.y1 + 30.0,
                 },
-                action: PdfAction::GoTo(PdfDestination::Page {
+                action: LinkAction::Action(PdfAction::GoTo(PdfDestination::Page {
                     page: 1,
                     kind: DestinationKind::FitH { top: Some(300.0) },
-                }),
+                })),
             },
             PdfLink {
                 bounds: Rect {
@@ -804,7 +807,7 @@ fn test_rotated_source_page() {
                     x1: link_bounds.x1,
                     y1: link_bounds.y1 + 45.0,
                 },
-                action: PdfAction::Uri("https://example.com".into()),
+                action: LinkAction::Action(PdfAction::Uri("https://example.com".into())),
             },
         ];
 
@@ -876,10 +879,10 @@ fn test_named_goto_and_gotor_links() {
         .iter()
         .map(|link| PdfLink {
             bounds: link.bounds,
-            action: PdfAction::GoTo(PdfDestination::Page {
+            action: LinkAction::Action(PdfAction::GoTo(PdfDestination::Page {
                 page: 0,
                 kind: DestinationKind::FitV { left: Some(200.0) },
-            }),
+            })),
         })
         .collect();
 
@@ -1080,14 +1083,14 @@ fn test_mixed_links() {
 fn test_large_coordinates() {
     let links = vec![PdfLink {
         bounds: test_link_rect(0),
-        action: PdfAction::GoTo(PdfDestination::Page {
+        action: LinkAction::Action(PdfAction::GoTo(PdfDestination::Page {
             page: 1,
             kind: DestinationKind::XYZ {
                 left: Some(10000.0),
                 top: Some(10000.0),
                 zoom: Some(500.0),
             },
-        }),
+        })),
     }];
 
     let pdf = create_pdf_with_links(2, &links);
@@ -1096,7 +1099,7 @@ fn test_large_coordinates() {
     assert_eq!(extracted.len(), 1);
 
     match &extracted[0].action {
-        PdfAction::GoTo(PdfDestination::Page { page, kind }) => {
+        LinkAction::Action(PdfAction::GoTo(PdfDestination::Page { page, kind })) => {
             assert_eq!(*page, 1);
             match kind {
                 DestinationKind::XYZ { left, top, zoom } => {
@@ -1184,4 +1187,219 @@ fn test_add_links_with_wrong_document_context() {
 
     let links = [PdfAction::Uri("https://fail.com".into())].create_links();
     page.add_links(&mut doc_alien, &links).unwrap();
+}
+
+/// Round-trip test for `LinkAction::Dest` with explicit page destinations.
+///
+/// Verifies:
+/// - `/Dest` key is present in the annotation dictionary
+/// - `/A` key is absent (mutual exclusivity)
+/// - `link_action()` returns `LinkAction::Dest` variant (not `LinkAction::Action`)
+/// - Destination data round-trips correctly
+#[test]
+fn test_link_action_dest_explicit_roundtrip() {
+    use crate::pdf::PdfAnnotationType;
+
+    let mut doc = PdfDocument::new();
+    for _ in 0..3 {
+        doc.new_page(PAGE_SIZE).unwrap();
+    }
+
+    let kinds = [
+        DestinationKind::Fit,
+        DestinationKind::FitH { top: Some(300.0) },
+        DestinationKind::XYZ {
+            left: Some(100.0),
+            top: Some(500.0),
+            zoom: Some(150.0),
+        },
+    ];
+
+    let links: Vec<PdfLink> = kinds
+        .iter()
+        .enumerate()
+        .map(|(i, kind)| PdfLink {
+            bounds: test_link_rect(i),
+            action: LinkAction::Dest(PdfDestination::Page {
+                page: (i % 3) as u32,
+                kind: *kind,
+            }),
+        })
+        .collect();
+
+    {
+        let mut page = doc.load_pdf_page(0).unwrap();
+        page.add_links(&mut doc, &links).unwrap();
+    }
+
+    // Verify via annotation dictionary inspection
+    let page = doc.load_pdf_page(0).unwrap();
+    for (i, annot) in page.annotations().enumerate() {
+        assert_eq!(annot.r#type().unwrap(), PdfAnnotationType::Link);
+
+        // Check that /Dest is present and /A is absent
+        let obj = annot.obj().unwrap();
+        assert!(
+            obj.get_dict("Dest").unwrap().is_some(),
+            "Link {i}: /Dest should be present"
+        );
+        assert!(
+            obj.get_dict("A").unwrap().is_none(),
+            "Link {i}: /A should be absent when /Dest is set"
+        );
+
+        // Check that link_action() returns Dest variant
+        let action = annot.link_action(&doc, Some(0)).unwrap().unwrap();
+        match &action {
+            LinkAction::Dest(PdfDestination::Page { page, kind: _ }) => {
+                let expected_page = (i % 3) as u32;
+                assert_eq!(*page, expected_page, "Link {i}: page mismatch");
+            }
+            other => panic!("Link {i}: expected LinkAction::Dest(Page), got {other:?}"),
+        }
+
+        // Check backward compat: link_pdf_action() wraps as GoTo
+        let pdf_action = annot.link_pdf_action(&doc, Some(0)).unwrap().unwrap();
+        match &pdf_action {
+            PdfAction::GoTo(PdfDestination::Page { page, kind: _ }) => {
+                let expected_page = (i % 3) as u32;
+                assert_eq!(*page, expected_page, "Link {i}: page mismatch (pdf_action)");
+            }
+            other => panic!("Link {i}: expected PdfAction::GoTo(Page), got {other:?}"),
+        }
+    }
+}
+
+/// Round-trip test for `LinkAction::Dest` with named destinations.
+#[test]
+fn test_link_action_dest_named_roundtrip() {
+    use crate::pdf::PdfAnnotationType;
+
+    let mut doc = PdfDocument::new();
+    doc.new_page(PAGE_SIZE).unwrap();
+
+    let links: Vec<PdfLink> = vec![
+        PdfLink {
+            bounds: test_link_rect(0),
+            action: LinkAction::Dest(PdfDestination::Named("Chapter1".into())),
+        },
+        PdfLink {
+            bounds: test_link_rect(1),
+            action: LinkAction::Dest(PdfDestination::Named("Section.2.3".into())),
+        },
+    ];
+
+    {
+        let mut page = doc.load_pdf_page(0).unwrap();
+        page.add_links(&mut doc, &links).unwrap();
+    }
+
+    let page = doc.load_pdf_page(0).unwrap();
+    for (i, annot) in page.annotations().enumerate() {
+        assert_eq!(annot.r#type().unwrap(), PdfAnnotationType::Link);
+
+        let obj = annot.obj().unwrap();
+        assert!(
+            obj.get_dict("Dest").unwrap().is_some(),
+            "Link {i}: /Dest should be present"
+        );
+        assert!(
+            obj.get_dict("A").unwrap().is_none(),
+            "Link {i}: /A should be absent when /Dest is set"
+        );
+
+        let action = annot.link_action(&doc, Some(0)).unwrap().unwrap();
+        match &action {
+            LinkAction::Dest(PdfDestination::Named(name)) => {
+                let expected = match i {
+                    0 => "Chapter1",
+                    1 => "Section.2.3",
+                    _ => unreachable!(),
+                };
+                assert_eq!(name, expected, "Link {i}: name mismatch");
+            }
+            other => panic!("Link {i}: expected LinkAction::Dest(Named), got {other:?}"),
+        }
+    }
+}
+
+/// Verify that `LinkAction::Action` writes `/A` and removes `/Dest`,
+/// and that switching from `/A` to `/Dest` removes `/A`.
+#[test]
+fn test_link_action_action_removes_dest() {
+    use crate::pdf::PdfAnnotationType;
+
+    let mut doc = PdfDocument::new();
+    doc.new_page(PAGE_SIZE).unwrap();
+    doc.new_page(PAGE_SIZE).unwrap();
+
+    // Create a Link annotation — page must stay alive while we use the annotation
+    let mut page = doc.load_pdf_page(0).unwrap();
+    let mut annot = page.create_annotation(PdfAnnotationType::Link).unwrap();
+
+    // Set Dest on the annotation
+    annot
+        .set_link_action(
+            &mut doc,
+            &LinkAction::Dest(PdfDestination::Page {
+                page: 1,
+                kind: DestinationKind::Fit,
+            }),
+        )
+        .unwrap();
+
+    {
+        let obj = annot.obj().unwrap();
+        assert!(
+            obj.get_dict("Dest").unwrap().is_some(),
+            "/Dest should be present after set_link_action(Dest)"
+        );
+        assert!(
+            obj.get_dict("A").unwrap().is_none(),
+            "/A should be absent when /Dest is set"
+        );
+    }
+
+    // Now overwrite with an Action — should remove /Dest and set /A
+    annot
+        .set_link_action(
+            &mut doc,
+            &LinkAction::Action(PdfAction::Uri("https://example.com".into())),
+        )
+        .unwrap();
+
+    {
+        let obj = annot.obj().unwrap();
+        assert!(
+            obj.get_dict("A").unwrap().is_some(),
+            "/A should be present after set_link_action(Action)"
+        );
+        assert!(
+            obj.get_dict("Dest").unwrap().is_none(),
+            "/Dest should be removed after set_link_action(Action)"
+        );
+    }
+
+    // Switch back to Dest — should remove /A and set /Dest
+    annot
+        .set_link_action(
+            &mut doc,
+            &LinkAction::Dest(PdfDestination::Page {
+                page: 1,
+                kind: DestinationKind::Fit,
+            }),
+        )
+        .unwrap();
+
+    {
+        let obj = annot.obj().unwrap();
+        assert!(
+            obj.get_dict("Dest").unwrap().is_some(),
+            "/Dest should be present after set_link_action(Dest)"
+        );
+        assert!(
+            obj.get_dict("A").unwrap().is_none(),
+            "/A should be removed after set_link_action(Dest)"
+        );
+    }
 }

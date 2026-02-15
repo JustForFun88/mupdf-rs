@@ -33,11 +33,11 @@ const URI_PATH_SET: &AsciiSet = &URI_COMPONENT_SET.remove(b'/');
 
 mod build;
 pub(crate) use build::build_link_annotation;
-pub(crate) use build::set_action_on_annot_dict;
+pub(crate) use build::set_link_action_on_annot_dict;
 
 mod extraction;
-pub(crate) use extraction::parse_action_from_annot_dict;
 pub(crate) use extraction::parse_external_link;
+pub(crate) use extraction::parse_link_action_from_annot_dict;
 
 #[cfg(test)]
 mod tests_build;
@@ -52,8 +52,76 @@ mod tests_format;
 pub struct PdfLink {
     /// Link rectangle in Fitz coordinate space.
     pub bounds: Rect,
-    /// Link action information.
-    pub action: PdfAction,
+    /// Link action or destination (see [PDF 32000-1:2008, 12.5.6.5], Table 173).
+    ///
+    /// [PDF 32000-1:2008, 12.5.6.5]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.1951136
+    pub action: LinkAction,
+}
+
+/// A link annotation's action or destination entry (see [PDF 32000-1:2008, 12.5.6.5], Table 173).
+///
+/// [PDF 32000-1:2008, 12.5.6.5]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.1951136
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkAction {
+    /// Action dictionary (`A` entry in the annotation dictionary) (see [PDF 32000-1:2008, 12.6.4]).
+    ///
+    /// [PDF 32000-1:2008, 12.6.4]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.1697199
+    Action(PdfAction),
+    /// Direct destination (`Dest` entry in the annotation dictionary) (see [PDF 32000-1:2008, 12.3.2]).
+    ///
+    /// [PDF 32000-1:2008, 12.3.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.2063217
+    Dest(PdfDestination),
+}
+
+impl LinkAction {
+    /// Converts this `LinkAction` into a [`PdfAction`].
+    ///
+    /// `Dest(d)` becomes `PdfAction::GoTo(d)`, `Action(a)` passes through.
+    pub fn into_pdf_action(self) -> PdfAction {
+        match self {
+            LinkAction::Action(a) => a,
+            LinkAction::Dest(d) => PdfAction::GoTo(d),
+        }
+    }
+
+    /// Returns the destination, if any.
+    ///
+    /// Returns `Some` for `Dest(d)` or `Action(GoTo(d))`.
+    pub fn destination(&self) -> Option<&PdfDestination> {
+        match self {
+            LinkAction::Action(PdfAction::GoTo(d)) => Some(d),
+            LinkAction::Dest(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Convenience method that returns the [`Display`](fmt::Display) output as an owned `String`.
+    ///
+    /// See [`fmt::Display`] impl for output format details and MuPDF source references.
+    pub fn to_uri(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl fmt::Display for LinkAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LinkAction::Action(action) => write!(f, "{action}"),
+            LinkAction::Dest(dest) => write!(f, "#{dest}"),
+        }
+    }
+}
+
+impl From<PdfAction> for LinkAction {
+    fn from(action: PdfAction) -> Self {
+        LinkAction::Action(action)
+    }
+}
+
+impl From<PdfDestination> for LinkAction {
+    fn from(dest: PdfDestination) -> Self {
+        LinkAction::Dest(dest)
+    }
 }
 
 /// PDF link destination representing an action associated with a link annotation
@@ -139,11 +207,35 @@ pub enum FileSpec {
     Url(String),
 }
 
-/// Destination within a PDF document (see [PDF 32000-1:2008], 12.3.2).
+impl fmt::Display for FileSpec {
+    /// Formats this file specification as a [MuPDF-compatible] URI string.
+    ///
+    /// Follows MuPDF's [`convert_file_spec_to_URI`] logic:
+    /// - `FileSpec::Path` -> `file://<percent-encoded path>` (absolute) or `file:<percent-encoded path>` (relative)
+    /// - `FileSpec::Url` -> the URL string as-is
+    ///
+    /// [`convert_file_spec_to_URI`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L288
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileSpec::Path(path) => {
+                let prefix = if path.starts_with('/') {
+                    "file://"
+                } else {
+                    "file:"
+                };
+                write!(f, "{prefix}{}", utf8_percent_encode(path, URI_PATH_SET))
+            }
+            FileSpec::Url(url) => f.write_str(url),
+        }
+    }
+}
+
+/// Destination within a PDF document (see [PDF 32000-1:2008, 12.3.2]).
 ///
-/// Represents the `D` entry in both GoTo and GoToR actions.
+/// Represents the `D` entry in both `GoTo` and `GoToR` [`PdfAction`] or
+/// `Dest` entry in [`LinkAction`].
 ///
-/// [PDF 32000-1:2008]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.2063217
+/// [PDF 32000-1:2008, 12.3.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.2063217
 #[derive(Debug, Clone, PartialEq)]
 pub enum PdfDestination {
     /// Explicit destination: zero-based page number with view settings (e.g., page 0, Fit).
@@ -157,6 +249,25 @@ impl Default for PdfDestination {
         Self::Page {
             page: 0,
             kind: DestinationKind::default(),
+        }
+    }
+}
+
+impl fmt::Display for PdfDestination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PdfDestination::Page { page, kind } => {
+                write!(f, "page={}{kind}", page.saturating_add(1))
+            }
+            PdfDestination::Named(name) => {
+                // MuPDF: pdf_append_named_dest_to_uri
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1023
+                write!(
+                    f,
+                    "nameddest={}",
+                    utf8_percent_encode(name, URI_COMPONENT_SET)
+                )
+            }
         }
     }
 }
@@ -227,20 +338,7 @@ impl fmt::Display for PdfAction {
     /// [`pdf_append_named_dest_to_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1023
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PdfAction::GoTo(dest) => match dest {
-                PdfDestination::Page { page, kind } => {
-                    write!(f, "#page={}{kind}", page.saturating_add(1))
-                }
-                PdfDestination::Named(name) => {
-                    // MuPDF: pdf_append_named_dest_to_uri
-                    // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1023
-                    write!(
-                        f,
-                        "#nameddest={}",
-                        utf8_percent_encode(name, URI_COMPONENT_SET)
-                    )
-                }
-            },
+            PdfAction::GoTo(dest) => write!(f, "#{dest}"),
             PdfAction::Uri(uri) => {
                 // MuPDF: pdf_parse_link_action returns URI as-is
                 // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L545
@@ -249,35 +347,22 @@ impl fmt::Display for PdfAction {
             PdfAction::Launch(file) => {
                 // MuPDF: convert_file_spec_to_URI
                 // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L288
-                write_file_spec_uri(f, file)?;
                 let sep = match file {
                     FileSpec::Url(url) if url.contains('#') => '&',
                     _ => '#',
                 };
-                write!(f, "{sep}page=1")
+                write!(f, "{file}{sep}page=1")
             }
             PdfAction::GoToR { file, dest } => {
                 // MuPDF: convert_file_spec_to_URI
                 // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L288
-                write_file_spec_uri(f, file)?;
                 // `FileSpec::Path` never contains '#' (it gets percent-encoded),
                 // so only `FileSpec::Url` can already have a fragment.
                 let sep = match file {
                     FileSpec::Url(url) if url.contains('#') => '&',
                     _ => '#',
                 };
-                match dest {
-                    PdfDestination::Page { page, kind } => {
-                        write!(f, "{sep}page={}{kind}", page.saturating_add(1))
-                    }
-                    PdfDestination::Named(name) => {
-                        write!(
-                            f,
-                            "{sep}nameddest={}",
-                            utf8_percent_encode(name, URI_COMPONENT_SET)
-                        )
-                    }
-                }
+                write!(f, "{file}{sep}{dest}")
             }
         }
     }
@@ -288,9 +373,9 @@ impl fmt::Display for PdfAction {
 /// These methods are meaningful only on annotations with
 /// [`type()`](PdfAnnotation::r#type) == [`PdfAnnotationType::Link`].
 impl PdfAnnotation {
-    /// Reads the link action from this annotation's dictionary.
+    /// Reads the link action from this annotation's dictionary, preserving
+    /// the `/Dest` vs `/A` distinction.
     ///
-    /// Parses `/Dest` (if present) or `/A` action dictionary into a structured [`PdfAction`].
     /// Returns `Ok(None)` if this is not a Link annotation or has no recognizable action.
     ///
     /// `page_num` is the 0-based page number where this annotation lives, used to
@@ -300,25 +385,38 @@ impl PdfAnnotation {
     ///
     /// Unlike [`PdfPage::pdf_links`](crate::pdf::PdfPage::pdf_links), this method:
     /// - Does **not** resolve named destinations to page numbers
-    /// - Does **not** transform coordinates from PDF user space to Fitz space
     /// - Preserves the `Launch(FileSpec::Url)` vs `Uri` distinction
+    /// - Preserves whether the original entry was `/Dest` or `/A`
     pub fn link_action(
         &self,
         doc: &PdfDocument,
         page_num: Option<i32>,
-    ) -> Result<Option<PdfAction>, Error> {
+    ) -> Result<Option<LinkAction>, Error> {
         if self.r#type()? != PdfAnnotationType::Link {
             return Ok(None);
         }
         let obj = self.obj()?;
-        parse_action_from_annot_dict(&obj, doc, page_num)
+        parse_link_action_from_annot_dict(&obj, doc, page_num)
+    }
+
+    /// Like [`link_action`](Self::link_action) but always returns a [`PdfAction`],
+    /// wrapping `/Dest` entries as `PdfAction::GoTo`.
+    ///
+    /// Use this when you don't need to distinguish between `/Dest` and `/A` entries.
+    pub fn link_pdf_action(
+        &self,
+        doc: &PdfDocument,
+        page_num: Option<i32>,
+    ) -> Result<Option<PdfAction>, Error> {
+        Ok(self
+            .link_action(doc, page_num)?
+            .map(LinkAction::into_pdf_action))
     }
 
     /// Replaces the link action on this annotation.
     ///
-    /// Removes any existing `/Dest` entry and sets the `/A` (Action) dictionary
-    /// based on the provided [`PdfAction`]. All other annotation properties
-    /// (color, border, flags, etc.) are preserved unchanged.
+    /// For [`LinkAction::Dest`], writes a `/Dest` entry directly and removes `/A`.
+    /// For [`LinkAction::Action`], writes an `/A` dictionary and removes `/Dest`.
     ///
     /// `GoTo` destination coordinates are transformed from Fitz space to PDF
     /// user space using the destination page's CTM.
@@ -329,9 +427,19 @@ impl PdfAnnotation {
     pub fn set_link_action(
         &mut self,
         doc: &mut PdfDocument,
-        action: &PdfAction,
+        action: &LinkAction,
     ) -> Result<(), Error> {
         self.set_link_action_with_inv_ctm(doc, action, |page_obj| Ok(page_obj.page_ctm()?.invert()))
+    }
+
+    /// Convenience method that wraps a [`PdfAction`] as [`LinkAction::Action`]
+    /// and calls [`set_link_action`](Self::set_link_action).
+    pub fn set_link_pdf_action(
+        &mut self,
+        doc: &mut PdfDocument,
+        action: &PdfAction,
+    ) -> Result<(), Error> {
+        self.set_link_action(doc, &LinkAction::Action(action.clone()))
     }
 
     /// Like [`set_link_action`](Self::set_link_action) but with a caller-provided
@@ -342,7 +450,7 @@ impl PdfAnnotation {
     pub fn set_link_action_with_inv_ctm(
         &mut self,
         doc: &mut PdfDocument,
-        action: &PdfAction,
+        action: &LinkAction,
         mut dest_inv_ctm: impl FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
     ) -> Result<(), Error> {
         if self.r#type()? != PdfAnnotationType::Link {
@@ -352,27 +460,6 @@ impl PdfAnnotation {
         }
         let mut obj = self.obj()?;
         let mut page_cache: HashMap<u32, (PdfObject, Option<Matrix>)> = HashMap::new();
-        set_action_on_annot_dict(doc, &mut obj, action, &mut dest_inv_ctm, &mut page_cache)
-    }
-}
-
-/// Writes the file spec URI prefix into the formatter.
-///
-/// Follows MuPDF's [`convert_file_spec_to_URI`] logic:
-/// - `FileSpec::Path` -> `file://<percent-encoded path>` (absolute) or `file:<percent-encoded path>` (relative)
-/// - `FileSpec::Url` -> the URL string as-is
-///
-/// [`convert_file_spec_to_URI`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L288
-fn write_file_spec_uri(f: &mut fmt::Formatter<'_>, file: &FileSpec) -> fmt::Result {
-    match file {
-        FileSpec::Path(path) => {
-            let prefix = if path.starts_with('/') {
-                "file://"
-            } else {
-                "file:"
-            };
-            write!(f, "{prefix}{}", utf8_percent_encode(path, URI_PATH_SET))
-        }
-        FileSpec::Url(url) => f.write_str(url),
+        set_link_action_on_annot_dict(doc, &mut obj, action, &mut dest_inv_ctm, &mut page_cache)
     }
 }

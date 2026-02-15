@@ -11,8 +11,8 @@ use mupdf_sys::*;
 use crate::link::LinkDestination;
 use crate::pdf::links::{build_link_annotation, parse_external_link};
 use crate::pdf::{
-    PdfAction, PdfAnnotation, PdfAnnotationType, PdfDestination, PdfDocument, PdfFilterOptions,
-    PdfLink, PdfObject,
+    LinkAction, PdfAction, PdfAnnotation, PdfAnnotationType, PdfDestination, PdfDocument,
+    PdfFilterOptions, PdfLink, PdfObject,
 };
 use crate::{context, unsafe_impl_ffi_wrapper, Error, FFIWrapper, Matrix, Page, Rect};
 
@@ -336,10 +336,10 @@ impl Iterator for PdfLinkIter {
                     Ok(Some(dest)) => {
                         // In PDFs, `page_in_chapter` is equivalent to `page_number`. Using it directly
                         // allows the compiler to elide the `fz_page_number_from_location` FFI call.
-                        PdfAction::GoTo(PdfDestination::Page {
+                        LinkAction::Action(PdfAction::GoTo(PdfDestination::Page {
                             page: dest.loc.page_in_chapter,
                             kind: dest.kind,
-                        })
+                        }))
                     }
                     Ok(None) => match parse_external_link(uri.to_string_lossy().as_ref()) {
                         Some(action) => match action {
@@ -348,7 +348,7 @@ impl Iterator for PdfLinkIter {
                                 // Reaching this point means the destination remains unresolved, so ignore and skip.
                                 continue;
                             }
-                            action => action,
+                            action => LinkAction::Action(action),
                         },
                         None => continue,
                     },
