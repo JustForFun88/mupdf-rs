@@ -437,11 +437,11 @@ impl PdfAnnotation {
         let mut obj = self.obj()?;
         // Remove conflicting entry from existing annotation dict
         match action {
-            LinkAction::Dest(_) => {
-                let _ = obj.dict_delete("A");
-            }
             LinkAction::Action(_) => {
                 let _ = obj.dict_delete("Dest");
+            }
+            LinkAction::Dest(_) => {
+                let _ = obj.dict_delete("A");
             }
         }
         let mut page_cache: HashMap<u32, (PdfObject, Option<Matrix>)> = HashMap::new();

@@ -93,6 +93,34 @@ where
     Ok(annot)
 }
 
+/// Dispatches a [`LinkAction`] to the appropriate builder function.
+///
+/// - [`LinkAction::Dest`] -> [`set_dest_on_annot_dict`] (writes `/Dest`)
+/// - [`LinkAction::Action`] -> [`set_action_on_annot_dict`] (writes `/A`)
+///
+/// Note: Callers are responsible for removing conflicting entries (`/A` or `/Dest`)
+/// when updating existing annotations
+/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
+pub(crate) fn set_link_action_on_annot_dict<F>(
+    doc: &mut PdfDocument,
+    annot: &mut PdfObject,
+    action: &LinkAction,
+    fn_dest_inv_ctm: &mut F,
+    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
+) -> Result<(), Error>
+where
+    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+{
+    match action {
+        LinkAction::Action(pdf_action) => {
+            set_action_on_annot_dict(doc, annot, pdf_action, fn_dest_inv_ctm, page_cache)
+        }
+        LinkAction::Dest(dest) => {
+            set_dest_on_annot_dict(doc, annot, dest, fn_dest_inv_ctm, page_cache)
+        }
+    }
+}
+
 /// Builds and sets the `/A` action entry on an annotation dictionary from a [`PdfAction`].
 ///
 /// For `GoTo(Page { .. })` destinations, coordinates are transformed from Fitz space
@@ -211,34 +239,6 @@ where
             action.dict_put("S", PdfObject::new_name("Launch")?)?;
             action.dict_put("F", file_spec)?;
             annot.dict_put("A", action)
-        }
-    }
-}
-
-/// Dispatches a [`LinkAction`] to the appropriate builder function.
-///
-/// - [`LinkAction::Dest`] -> [`set_dest_on_annot_dict`] (writes `/Dest`)
-/// - [`LinkAction::Action`] -> [`set_action_on_annot_dict`] (writes `/A`)
-///
-/// **Note:** Callers are responsible for removing conflicting entries (`/A` or `/Dest`)
-/// when updating existing annotations
-/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
-pub(crate) fn set_link_action_on_annot_dict<F>(
-    doc: &mut PdfDocument,
-    annot: &mut PdfObject,
-    action: &LinkAction,
-    fn_dest_inv_ctm: &mut F,
-    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
-) -> Result<(), Error>
-where
-    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
-{
-    match action {
-        LinkAction::Dest(dest) => {
-            set_dest_on_annot_dict(doc, annot, dest, fn_dest_inv_ctm, page_cache)
-        }
-        LinkAction::Action(pdf_action) => {
-            set_action_on_annot_dict(doc, annot, pdf_action, fn_dest_inv_ctm, page_cache)
         }
     }
 }
