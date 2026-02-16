@@ -1258,8 +1258,8 @@ fn test_link_action_dest_explicit_roundtrip() {
             other => panic!("Link {i}: expected LinkAction::Dest(Page), got {other:?}"),
         }
 
-        // Check backward compat: link_pdf_action() wraps as GoTo
-        let pdf_action = annot.link_pdf_action(&doc, Some(0)).unwrap().unwrap();
+        // Check into_pdf_action() wraps as GoTo
+        let pdf_action = annot.link_action(&doc, Some(0)).unwrap().unwrap().into_pdf_action();
         match &pdf_action {
             PdfAction::GoTo(PdfDestination::Page { page, kind: _ }) => {
                 let expected_page = (i % 3) as u32;

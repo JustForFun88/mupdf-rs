@@ -399,20 +399,6 @@ impl PdfAnnotation {
         parse_link_action_from_annot_dict(&obj, doc, page_num)
     }
 
-    /// Like [`link_action`](Self::link_action) but always returns a [`PdfAction`],
-    /// wrapping `/Dest` entries as `PdfAction::GoTo`.
-    ///
-    /// Use this when you don't need to distinguish between `/Dest` and `/A` entries.
-    pub fn link_pdf_action(
-        &self,
-        doc: &PdfDocument,
-        page_num: Option<i32>,
-    ) -> Result<Option<PdfAction>, Error> {
-        Ok(self
-            .link_action(doc, page_num)?
-            .map(LinkAction::into_pdf_action))
-    }
-
     /// Replaces the link action on this annotation.
     ///
     /// For [`LinkAction::Dest`], writes a `/Dest` entry directly and removes `/A`.
@@ -432,16 +418,6 @@ impl PdfAnnotation {
         self.set_link_action_with_inv_ctm(doc, action, |page_obj| Ok(page_obj.page_ctm()?.invert()))
     }
 
-    /// Convenience method that wraps a [`PdfAction`] as [`LinkAction::Action`]
-    /// and calls [`set_link_action`](Self::set_link_action).
-    pub fn set_link_pdf_action(
-        &mut self,
-        doc: &mut PdfDocument,
-        action: &PdfAction,
-    ) -> Result<(), Error> {
-        self.set_link_action(doc, &LinkAction::Action(action.clone()))
-    }
-
     /// Like [`set_link_action`](Self::set_link_action) but with a caller-provided
     /// inverse CTM for `GoTo` destination coordinate transformation.
     ///
@@ -459,6 +435,15 @@ impl PdfAnnotation {
             ));
         }
         let mut obj = self.obj()?;
+        // Remove conflicting entry from existing annotation dict
+        match action {
+            LinkAction::Dest(_) => {
+                let _ = obj.dict_delete("A");
+            }
+            LinkAction::Action(_) => {
+                let _ = obj.dict_delete("Dest");
+            }
+        }
         let mut page_cache: HashMap<u32, (PdfObject, Option<Matrix>)> = HashMap::new();
         set_link_action_on_annot_dict(doc, &mut obj, action, &mut dest_inv_ctm, &mut page_cache)
     }

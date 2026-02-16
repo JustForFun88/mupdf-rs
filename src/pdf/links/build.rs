@@ -95,13 +95,15 @@ where
 
 /// Builds and sets the `/A` action entry on an annotation dictionary from a [`PdfAction`].
 ///
-/// Removes any existing `/Dest` entry to avoid conflict with `/A`.
-///
 /// For `GoTo(Page { .. })` destinations, coordinates are transformed from Fitz space
 /// to PDF user space using `fn_dest_inv_ctm`. For `GoToR`, coordinates are used as-is.
 ///
 /// This function is used both for creating new annotations (via [`build_link_annotation`])
 /// and for updating existing annotations (via [`PdfAnnotation::set_link_action`]).
+///
+/// **Note:** Callers are responsible for removing conflicting `/Dest` entries before
+/// calling this function when updating existing annotations
+/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
 pub(crate) fn set_action_on_annot_dict<F>(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
@@ -112,9 +114,6 @@ pub(crate) fn set_action_on_annot_dict<F>(
 where
     F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
 {
-    // Remove /Dest to avoid conflict with /A
-    let _ = annot.dict_delete("Dest");
-
     match action {
         PdfAction::GoTo(dest) => match dest {
             PdfDestination::Page { page, kind } => {
@@ -218,8 +217,12 @@ where
 
 /// Dispatches a [`LinkAction`] to the appropriate builder function.
 ///
-/// - [`LinkAction::Dest`] -> [`set_dest_on_annot_dict`] (writes `/Dest`, removes `/A`)
-/// - [`LinkAction::Action`] -> [`set_action_on_annot_dict`] (writes `/A`, removes `/Dest`)
+/// - [`LinkAction::Dest`] -> [`set_dest_on_annot_dict`] (writes `/Dest`)
+/// - [`LinkAction::Action`] -> [`set_action_on_annot_dict`] (writes `/A`)
+///
+/// **Note:** Callers are responsible for removing conflicting entries (`/A` or `/Dest`)
+/// when updating existing annotations
+/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
 pub(crate) fn set_link_action_on_annot_dict<F>(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
@@ -242,11 +245,12 @@ where
 
 /// Builds and sets the `/Dest` entry on an annotation dictionary from a [`PdfDestination`].
 ///
-/// Removes any existing `/A` entry to avoid conflict with `/Dest`
-/// (per PDF 32000-1:2008, Table 173).
-///
 /// For `Page { .. }` destinations, coordinates are transformed from Fitz space
 /// to PDF user space using `fn_dest_inv_ctm`. Named destinations are stored as-is.
+///
+/// **Note:** Callers are responsible for removing conflicting `/A` entries
+/// when updating existing annotations
+/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
 fn set_dest_on_annot_dict<F>(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
@@ -257,9 +261,6 @@ fn set_dest_on_annot_dict<F>(
 where
     F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
 {
-    // Remove /A to avoid conflict with /Dest
-    let _ = annot.dict_delete("A");
-
     match dest {
         PdfDestination::Page { page, kind } => {
             let mut dest = doc.new_array_with_capacity(6)?;
