@@ -9,7 +9,9 @@ use std::{
 use mupdf_sys::*;
 
 use crate::link::LinkDestination;
-use crate::pdf::links::{build_link_annotation, parse_external_link};
+use crate::pdf::links::{
+    build_link_annotation, parse_external_link, CachedResolver, DestPageResolver,
+};
 use crate::pdf::{
     LinkAction, PdfAction, PdfAnnotation, PdfAnnotationType, PdfDestination, PdfDocument,
     PdfFilterOptions, PdfLink, PdfObject,
@@ -202,11 +204,12 @@ impl PdfPage {
     /// # Coordinate transforms
     ///
     /// [`PdfLink`] coordinates are in Fitz space. PDF annotations need PDF default
-    /// user space. Two callbacks provide the inverse CTM for each context:
+    /// user space. Two mechanisms provide the inverse CTM for each context:
     ///
     /// - `annot_inv_ctm(page_obj)` — for the annotation `/Rect` on *this* page.
-    /// - `dest_inv_ctm(page_obj)` — for `GoTo(Page { .. })` destination coordinates
-    ///   on each *destination* page. `GoToR` coordinates are written as-is.
+    /// - `resolver` — a [`DestPageResolver`] that provides the destination page
+    ///   object and its inverse CTM for `GoTo(Page { .. })` destinations.
+    ///   `GoToR` coordinates are written as-is.
     ///
     /// # PdfAction -> annotation dictionary mapping
     ///
@@ -236,7 +239,7 @@ impl PdfPage {
         doc: &mut PdfDocument,
         links: &[PdfLink],
         annot_inv_ctm: impl FnOnce(&PdfObject) -> Result<Option<Matrix>, Error>,
-        mut dest_inv_ctm: impl FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+        resolver: &mut impl DestPageResolver,
     ) -> Result<(), Error> {
         if links.is_empty() {
             return Ok(());
@@ -255,17 +258,8 @@ impl PdfPage {
             None => doc.new_array()?,
         };
 
-        let mut page_cache: HashMap<u32, (PdfObject, Option<Matrix>)> = HashMap::new();
-
         for link in links {
-            let annot = build_link_annotation(
-                doc,
-                &page_obj,
-                link,
-                &annot_inv_ctm,
-                &mut dest_inv_ctm,
-                &mut page_cache,
-            )?;
+            let annot = build_link_annotation(doc, &page_obj, link, &annot_inv_ctm, resolver)?;
             let annot_indirect = doc.add_object(&annot)?;
             annots.array_push(annot_indirect)?;
         }
@@ -281,15 +275,21 @@ impl PdfPage {
     /// transformation.
     ///
     /// Convenience wrapper around [`add_links_with_inv_ctm`](Self::add_links_with_inv_ctm)
-    /// that derives both inverse CTMs from `page_obj.page_ctm().invert()`. This is
-    /// correct when all link coordinates (both annotation bounds and `GoTo` destinations)
-    /// are in MuPDF's Fitz coordinate space.
+    /// that uses a cached resolver deriving inverse CTMs from
+    /// `page_obj.page_ctm().invert()`. This is correct when all link coordinates
+    /// (both annotation bounds and `GoTo` destinations) are in MuPDF's Fitz
+    /// coordinate space.
     pub fn add_links(&mut self, doc: &mut PdfDocument, links: &[PdfLink]) -> Result<(), Error> {
+        let mut cache = HashMap::new();
+        let mut resolver = CachedResolver {
+            cache: &mut cache,
+            fn_dest_inv_ctm: |page_obj: &PdfObject| Ok(page_obj.page_ctm()?.invert()),
+        };
         self.add_links_with_inv_ctm(
             doc,
             links,
             |page_obj| Ok(page_obj.page_ctm()?.invert()),
-            |page_obj| Ok(page_obj.page_ctm()?.invert()),
+            &mut resolver,
         )
     }
 }

@@ -1249,7 +1249,7 @@ fn test_link_action_dest_explicit_roundtrip() {
         );
 
         // Check that link_action() returns Dest variant
-        let action = annot.link_action(&doc, Some(0)).unwrap().unwrap();
+        let action = annot.get_link_action(&doc, Some(0)).unwrap().unwrap();
         match &action {
             LinkAction::Dest(PdfDestination::Page { page, kind: _ }) => {
                 let expected_page = (i % 3) as u32;
@@ -1259,7 +1259,11 @@ fn test_link_action_dest_explicit_roundtrip() {
         }
 
         // Check into_pdf_action() wraps as GoTo
-        let pdf_action = annot.link_action(&doc, Some(0)).unwrap().unwrap().into_pdf_action();
+        let pdf_action = annot
+            .get_link_action(&doc, Some(0))
+            .unwrap()
+            .unwrap()
+            .into_pdf_action();
         match &pdf_action {
             PdfAction::GoTo(PdfDestination::Page { page, kind: _ }) => {
                 let expected_page = (i % 3) as u32;
@@ -1308,7 +1312,7 @@ fn test_link_action_dest_named_roundtrip() {
             "Link {i}: /A should be absent when /Dest is set"
         );
 
-        let action = annot.link_action(&doc, Some(0)).unwrap().unwrap();
+        let action = annot.get_link_action(&doc, Some(0)).unwrap().unwrap();
         match &action {
             LinkAction::Dest(PdfDestination::Named(name)) => {
                 let expected = match i {

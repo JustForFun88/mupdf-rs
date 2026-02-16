@@ -2,12 +2,13 @@
 //!
 //! This module provides PDF-specific link handling built on MuPDF's low-level APIs.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 
-use crate::pdf::{PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject};
+use crate::pdf::{PdfDocument, PdfObject};
 use crate::{DestinationKind, Error, Matrix, Rect};
 
 /// Percent-encoding set matching MuPDF's [`URIUNESCAPED`] (RFC 2396 unreserved characters).
@@ -368,83 +369,78 @@ impl fmt::Display for PdfAction {
     }
 }
 
-/// Link-specific methods for [`PdfAnnotation`].
+/// Resolves destination page objects and their inverse CTMs for link building.
 ///
-/// These methods are meaningful only on annotations with
-/// [`type()`](PdfAnnotation::r#type) == [`PdfAnnotationType::Link`].
-impl PdfAnnotation {
-    /// Reads the link action from this annotation's dictionary, preserving
-    /// the `/Dest` vs `/A` distinction.
-    ///
-    /// Returns `Ok(None)` if this is not a Link annotation or has no recognizable action.
-    ///
-    /// `page_num` is the 0-based page number where this annotation lives, used to
-    /// resolve relative `Named` actions (`PrevPage`, `NextPage`). Pass `None` if
-    /// the page number is unknown; absolute named actions (`FirstPage`, `LastPage`)
-    /// will still be resolved.
-    ///
-    /// Unlike [`PdfPage::pdf_links`](crate::pdf::PdfPage::pdf_links), this method:
-    /// - Does **not** resolve named destinations to page numbers
-    /// - Preserves the `Launch(FileSpec::Url)` vs `Uri` distinction
-    /// - Preserves whether the original entry was `/Dest` or `/A`
-    pub fn link_action(
-        &self,
+/// This trait abstracts the retrieval of page objects and their inverse CTMs,
+/// allowing callers to control caching strategy. For example, a [`HashMap`]-backed
+/// implementation avoids redundant lookups when many links target the same page,
+/// while a single-slot implementation is lighter for one-off operations.
+pub trait DestPageResolver {
+    fn resolve(
+        &mut self,
         doc: &PdfDocument,
-        page_num: Option<i32>,
-    ) -> Result<Option<LinkAction>, Error> {
-        if self.r#type()? != PdfAnnotationType::Link {
-            return Ok(None);
-        }
-        let obj = self.obj()?;
-        parse_link_action_from_annot_dict(&obj, doc, page_num)
-    }
+        page_num: u32,
+    ) -> Result<(&PdfObject, &Option<Matrix>), Error>;
+}
 
-    /// Replaces the link action on this annotation.
-    ///
-    /// For [`LinkAction::Dest`], writes a `/Dest` entry directly and removes `/A`.
-    /// For [`LinkAction::Action`], writes an `/A` dictionary and removes `/Dest`.
-    ///
-    /// `GoTo` destination coordinates are transformed from Fitz space to PDF
-    /// user space using the destination page's CTM.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if this annotation is not of type Link.
-    pub fn set_link_action(
-        &mut self,
-        doc: &mut PdfDocument,
-        action: &LinkAction,
-    ) -> Result<(), Error> {
-        self.set_link_action_with_inv_ctm(doc, action, |page_obj| Ok(page_obj.page_ctm()?.invert()))
-    }
+/// Resolver for bulk operations. Caches pages in a HashMap.
+pub(crate) struct CachedResolver<'a, F> {
+    pub cache: &'a mut HashMap<u32, (PdfObject, Option<Matrix>)>,
+    pub fn_dest_inv_ctm: F,
+}
 
-    /// Like [`set_link_action`](Self::set_link_action) but with a caller-provided
-    /// inverse CTM for `GoTo` destination coordinate transformation.
-    ///
-    /// This mirrors the `dest_inv_ctm` callback in
-    /// [`PdfPage::add_links_with_inv_ctm`](crate::pdf::PdfPage::add_links_with_inv_ctm).
-    pub fn set_link_action_with_inv_ctm(
+impl<'a, F> DestPageResolver for CachedResolver<'a, F>
+where
+    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+{
+    fn resolve(
         &mut self,
-        doc: &mut PdfDocument,
-        action: &LinkAction,
-        mut dest_inv_ctm: impl FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
-    ) -> Result<(), Error> {
-        if self.r#type()? != PdfAnnotationType::Link {
-            return Err(Error::InvalidDestination(
-                "set_link_action called on non-Link annotation".into(),
-            ));
-        }
-        let mut obj = self.obj()?;
-        // Remove conflicting entry from existing annotation dict
-        match action {
-            LinkAction::Action(_) => {
-                let _ = obj.dict_delete("Dest");
+        doc: &PdfDocument,
+        page_num: u32,
+    ) -> Result<(&PdfObject, &Option<Matrix>), Error> {
+        match self.cache.entry(page_num) {
+            Entry::Occupied(entry) => {
+                let (obj, mat) = entry.into_mut();
+                Ok((obj, mat))
             }
-            LinkAction::Dest(_) => {
-                let _ = obj.dict_delete("A");
+            Entry::Vacant(entry) => {
+                let page_obj = doc.find_page(page_num as i32)?;
+                let inv_ctm = (self.fn_dest_inv_ctm)(&page_obj)?;
+                let (obj, mat) = entry.insert((page_obj, inv_ctm));
+                Ok((obj, mat))
             }
         }
-        let mut page_cache: HashMap<u32, (PdfObject, Option<Matrix>)> = HashMap::new();
-        set_link_action_on_annot_dict(doc, &mut obj, action, &mut dest_inv_ctm, &mut page_cache)
+    }
+}
+
+/// Resolver for single operations. Uses a single Option slot to own the data.
+pub(crate) struct SingleResolver<F> {
+    pub slot: Option<(PdfObject, Option<Matrix>)>,
+    pub fn_dest_inv_ctm: F,
+}
+
+impl<F> SingleResolver<F> {
+    pub fn new(fn_dest_inv_ctm: F) -> Self {
+        Self {
+            slot: None,
+            fn_dest_inv_ctm,
+        }
+    }
+}
+
+impl<F> DestPageResolver for SingleResolver<F>
+where
+    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
+{
+    fn resolve(
+        &mut self,
+        doc: &PdfDocument,
+        page_num: u32,
+    ) -> Result<(&PdfObject, &Option<Matrix>), Error> {
+        let page_obj = doc.find_page(page_num as i32)?;
+        let inv_ctm = (self.fn_dest_inv_ctm)(&page_obj)?;
+
+        let (obj, mat) = self.slot.insert((page_obj, inv_ctm));
+        Ok((obj, mat))
     }
 }

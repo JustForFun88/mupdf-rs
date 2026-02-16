@@ -1,7 +1,4 @@
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-
-use super::{FileSpec, LinkAction, PdfAction, PdfDestination, PdfLink};
+use super::{DestPageResolver, FileSpec, LinkAction, PdfAction, PdfDestination, PdfLink};
 use crate::pdf::{PdfDocument, PdfObject};
 use crate::{Error, Matrix};
 
@@ -35,7 +32,7 @@ use crate::{Error, Matrix};
 ///   - [`build_url_filespec`] for [`FileSpec::Url`]
 ///
 /// For `GoTo(Page { .. })`, destination coordinates are transformed from MuPDF page space back
-/// to PDF default user space using `fn_dest_inv_ctm` (see [`crate::DestinationKind::transform`]).
+/// to PDF default user space using the `resolver` (see [`crate::DestinationKind::transform`]).
 /// For `GoToR`, coordinates are used as-is (already in PDF default user space).
 ///
 /// # MuPDF source mapping
@@ -59,17 +56,13 @@ use crate::{Error, Matrix};
 /// [`fz_is_external_link`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/fitz/link.c#L68
 /// [`pdf_add_filespec`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1223
 /// [`pdf_add_url_filespec`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1268
-pub(crate) fn build_link_annotation<F>(
+pub(crate) fn build_link_annotation(
     doc: &mut PdfDocument,
     page_obj: &PdfObject,
     link: &PdfLink,
     annot_inv_ctm: &Option<Matrix>,
-    fn_dest_inv_ctm: &mut F,
-    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
-) -> Result<PdfObject, Error>
-where
-    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
-{
+    resolver: &mut impl DestPageResolver,
+) -> Result<PdfObject, Error> {
     let rect = annot_inv_ctm
         .as_ref()
         .map(|inv_ctm| link.bounds.transform(inv_ctm))
@@ -86,7 +79,7 @@ where
     border_style.dict_put("W", PdfObject::new_int(0)?)?;
     annot.dict_put("BS", border_style)?;
 
-    set_link_action_on_annot_dict(doc, &mut annot, &link.action, fn_dest_inv_ctm, page_cache)?;
+    set_link_action_on_annot_dict(doc, &mut annot, &link.action, resolver)?;
 
     annot.dict_put_ref("P", page_obj)?;
 
@@ -101,30 +94,24 @@ where
 /// Note: Callers are responsible for removing conflicting entries (`/A` or `/Dest`)
 /// when updating existing annotations
 /// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
-pub(crate) fn set_link_action_on_annot_dict<F>(
+pub(crate) fn set_link_action_on_annot_dict(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
     action: &LinkAction,
-    fn_dest_inv_ctm: &mut F,
-    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
-) -> Result<(), Error>
-where
-    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
-{
+    resolver: &mut impl DestPageResolver,
+) -> Result<(), Error> {
     match action {
         LinkAction::Action(pdf_action) => {
-            set_action_on_annot_dict(doc, annot, pdf_action, fn_dest_inv_ctm, page_cache)
+            set_action_on_annot_dict(doc, annot, pdf_action, resolver)
         }
-        LinkAction::Dest(dest) => {
-            set_dest_on_annot_dict(doc, annot, dest, fn_dest_inv_ctm, page_cache)
-        }
+        LinkAction::Dest(dest) => set_dest_on_annot_dict(doc, annot, dest, resolver),
     }
 }
 
 /// Builds and sets the `/A` action entry on an annotation dictionary from a [`PdfAction`].
 ///
 /// For `GoTo(Page { .. })` destinations, coordinates are transformed from Fitz space
-/// to PDF user space using `fn_dest_inv_ctm`. For `GoToR`, coordinates are used as-is.
+/// to PDF user space using the `resolver`. For `GoToR`, coordinates are used as-is.
 ///
 /// This function is used both for creating new annotations (via [`build_link_annotation`])
 /// and for updating existing annotations (via [`PdfAnnotation::set_link_action`]).
@@ -132,16 +119,12 @@ where
 /// **Note:** Callers are responsible for removing conflicting `/Dest` entries before
 /// calling this function when updating existing annotations
 /// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
-pub(crate) fn set_action_on_annot_dict<F>(
+pub(crate) fn set_action_on_annot_dict(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
     action: &PdfAction,
-    fn_dest_inv_ctm: &mut F,
-    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
-) -> Result<(), Error>
-where
-    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
-{
+    resolver: &mut impl DestPageResolver,
+) -> Result<(), Error> {
     match action {
         PdfAction::GoTo(dest) => match dest {
             PdfDestination::Page { page, kind } => {
@@ -149,14 +132,7 @@ where
                 // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1315
                 let mut dest = doc.new_array_with_capacity(6)?;
 
-                let (dest_page_obj, dest_inv_ctm) = match page_cache.entry(*page) {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        let page_obj = doc.find_page(*page as i32)?;
-                        let inv_ctm = fn_dest_inv_ctm(&page_obj)?;
-                        entry.insert((page_obj, inv_ctm))
-                    }
-                };
+                let (dest_page_obj, dest_inv_ctm) = resolver.resolve(doc, *page)?;
                 // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1325
                 dest.array_push_ref(dest_page_obj)?;
 
@@ -246,33 +222,22 @@ where
 /// Builds and sets the `/Dest` entry on an annotation dictionary from a [`PdfDestination`].
 ///
 /// For `Page { .. }` destinations, coordinates are transformed from Fitz space
-/// to PDF user space using `fn_dest_inv_ctm`. Named destinations are stored as-is.
+/// to PDF user space using the `resolver`. Named destinations are stored as-is.
 ///
 /// **Note:** Callers are responsible for removing conflicting `/A` entries
 /// when updating existing annotations
 /// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
-fn set_dest_on_annot_dict<F>(
+fn set_dest_on_annot_dict(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
     dest: &PdfDestination,
-    fn_dest_inv_ctm: &mut F,
-    page_cache: &mut HashMap<u32, (PdfObject, Option<Matrix>)>,
-) -> Result<(), Error>
-where
-    F: FnMut(&PdfObject) -> Result<Option<Matrix>, Error>,
-{
+    resolver: &mut impl DestPageResolver,
+) -> Result<(), Error> {
     match dest {
         PdfDestination::Page { page, kind } => {
             let mut dest = doc.new_array_with_capacity(6)?;
 
-            let (dest_page_obj, dest_inv_ctm) = match page_cache.entry(*page) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let page_obj = doc.find_page(*page as i32)?;
-                    let inv_ctm = fn_dest_inv_ctm(&page_obj)?;
-                    entry.insert((page_obj, inv_ctm))
-                }
-            };
+            let (dest_page_obj, dest_inv_ctm) = resolver.resolve(doc, *page)?;
 
             dest.array_push_ref(dest_page_obj)?;
 
