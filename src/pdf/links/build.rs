@@ -1,4 +1,4 @@
-use super::{DestPageResolver, FileSpec, LinkAction, PdfAction, PdfDestination, PdfLink};
+use super::{DestPageResolver, LinkAction, PdfAction, PdfLink};
 use crate::pdf::{PdfDocument, PdfObject};
 use crate::{Error, Matrix};
 
@@ -27,9 +27,7 @@ use crate::{Error, Matrix};
 /// - `page_int` is the zero-based page number as an integer (remote document)
 /// - `/Kind` is the PDF destination type name (e.g. `/Fit`, `/XYZ`) followed by its parameters
 ///   (see [`crate::DestinationKind::encode_into`])
-/// - `filespec dict` is a file specification dictionary built by:
-///   - [`build_filespec`] for [`FileSpec::Path`]
-///   - [`build_url_filespec`] for [`FileSpec::Url`]
+/// - `filespec dict` is a file specification dictionary built by [`super::FileSpec::encode_into`]
 ///
 /// For `GoTo(Page { .. })`, destination coordinates are transformed from MuPDF page space back
 /// to PDF default user space using the `resolver` (see [`crate::DestinationKind::transform`]).
@@ -44,8 +42,7 @@ use crate::{Error, Matrix};
 /// | `Uri(..)`                 | [`pdf_new_action_from_link`] ([`fz_is_external_link`] branch)              |
 /// | `GoToR { .. }`            | [`pdf_new_action_from_link`] (`file:` branch) + [`pdf_new_dest_from_link`] |
 /// | `Launch(..)`              | (no direct MuPDF equivalent, see [PDF 32000-1:2008, 12.6.4.5])             |
-/// | File spec (path)          | [`pdf_add_filespec`]                                                       |
-/// | File spec (URL)           | [`pdf_add_url_filespec`]                                                   |
+/// | File spec                 | [`pdf_add_filespec`] / [`pdf_add_url_filespec`]                            |
 ///
 /// [PDF 32000-1:2008, 12.5.6.5]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.1951136
 /// [12.6.4]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.1697199
@@ -92,8 +89,7 @@ pub(crate) fn build_link_annotation(
 /// - [`LinkAction::Action`] -> [`set_action_on_annot_dict`] (writes `/A`)
 ///
 /// Note: Callers are responsible for removing conflicting entries (`/A` or `/Dest`)
-/// when updating existing annotations
-/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
+/// when updating existing annotations.
 pub(crate) fn set_link_action_on_annot_dict(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
@@ -104,7 +100,10 @@ pub(crate) fn set_link_action_on_annot_dict(
         LinkAction::Action(pdf_action) => {
             set_action_on_annot_dict(doc, annot, pdf_action, resolver)
         }
-        LinkAction::Dest(dest) => set_dest_on_annot_dict(doc, annot, dest, resolver),
+        LinkAction::Dest(dest) => {
+            let dest_obj = dest.encode_local(doc, resolver)?;
+            annot.dict_put("Dest", dest_obj)
+        }
     }
 }
 
@@ -113,13 +112,9 @@ pub(crate) fn set_link_action_on_annot_dict(
 /// For `GoTo(Page { .. })` destinations, coordinates are transformed from Fitz space
 /// to PDF user space using the `resolver`. For `GoToR`, coordinates are used as-is.
 ///
-/// This function is used both for creating new annotations (via [`build_link_annotation`])
-/// and for updating existing annotations (via [`PdfAnnotation::set_link_action`]).
-///
-/// **Note:** Callers are responsible for removing conflicting `/Dest` entries before
-/// calling this function when updating existing annotations
-/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
-pub(crate) fn set_action_on_annot_dict(
+/// Note: Callers are responsible for removing conflicting `/Dest` entries before
+/// calling this function when updating existing annotations.
+fn set_action_on_annot_dict(
     doc: &mut PdfDocument,
     annot: &mut PdfObject,
     action: &PdfAction,
@@ -153,10 +148,7 @@ pub(crate) fn set_action_on_annot_dict(
 
             // Same as MuPDF `pdf_add_filespec_from_link` function
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1152
-            let file_spec = match file {
-                FileSpec::Url(url) => build_url_filespec(doc, url)?,
-                FileSpec::Path(path) => build_filespec(doc, path)?,
-            };
+            let file_spec = file.encode_into(doc)?;
 
             action.dict_put("F", file_spec)?;
             annot.dict_put("A", action)
@@ -164,10 +156,7 @@ pub(crate) fn set_action_on_annot_dict(
         PdfAction::Launch(file) => {
             // Same as MuPDF `pdf_add_filespec_from_link` function
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1152
-            let file_spec = match file {
-                FileSpec::Url(url) => build_url_filespec(doc, url)?,
-                FileSpec::Path(path) => build_filespec(doc, path)?,
-            };
+            let file_spec = file.encode_into(doc)?;
             // No direct MuPDF code, see PDF 32000-1:2008, section 12.6.4.5, Table 203.
             // https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.1952224
             let mut action = doc.new_dict_with_capacity(2)?;
@@ -176,48 +165,4 @@ pub(crate) fn set_action_on_annot_dict(
             annot.dict_put("A", action)
         }
     }
-}
-
-/// Builds and sets the `/Dest` entry on an annotation dictionary from a [`PdfDestination`].
-///
-/// For `Page { .. }` destinations, coordinates are transformed from Fitz space
-/// to PDF user space using the `resolver`. Named destinations are stored as-is.
-///
-/// **Note:** Callers are responsible for removing conflicting `/A` entries
-/// when updating existing annotations
-/// (see [`PdfAnnotation::set_link_action_with_inv_ctm`]).
-fn set_dest_on_annot_dict(
-    doc: &mut PdfDocument,
-    annot: &mut PdfObject,
-    dest: &PdfDestination,
-    resolver: &mut impl DestPageResolver,
-) -> Result<(), Error> {
-    let dest_obj = dest.encode_local(doc, resolver)?;
-    annot.dict_put("Dest", dest_obj)
-}
-
-/// This is the Rust analogue of MuPDF's logic found in `pdf_add_filespec` function
-/// (<https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1223>).
-fn build_filespec(doc: &mut PdfDocument, file: &str) -> Result<PdfObject, Error> {
-    let mut spec = doc.new_dict_with_capacity(3)?;
-    spec.dict_put("Type", PdfObject::new_name("Filespec")?)?;
-    let asciiname: String = file
-        .chars()
-        .map(|c| if matches!(c, ' '..='~') { c } else { '_' })
-        .collect();
-    spec.dict_put("F", PdfObject::new_string(&asciiname)?)?;
-    spec.dict_put("UF", PdfObject::new_string(file)?)?;
-    // MuPDF uses pdf_add_new_dict which creates an indirect object (pdf-link.c:1249)
-    doc.add_object(&spec)
-}
-
-/// This is the Rust analogue of MuPDF's logic found in `pdf_add_url_filespec` function
-/// (<https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1268>).
-fn build_url_filespec(doc: &mut PdfDocument, file: &str) -> Result<PdfObject, Error> {
-    let mut spec = doc.new_dict_with_capacity(3)?;
-    spec.dict_put("Type", PdfObject::new_name("Filespec")?)?;
-    spec.dict_put("FS", PdfObject::new_name("URL")?)?;
-    spec.dict_put("F", PdfObject::new_string(file)?)?;
-    // MuPDF uses pdf_add_new_dict which creates an indirect object (pdf-link.c:1268)
-    doc.add_object(&spec)
 }

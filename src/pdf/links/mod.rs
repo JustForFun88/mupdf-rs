@@ -170,169 +170,6 @@ pub enum PdfAction {
     Uri(String),
 }
 
-/// PDF file specification (see [PDF 32000-1:2008, 7.11]).
-///
-/// Represents a file reference that can be either a local filesystem path
-/// (absolute or relative, per [7.11.2]) or a URL-based reference (when `FS` is `URL`,
-/// per [7.11.5]).
-///
-/// [PDF 32000-1:2008, 7.11]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1640832
-/// [7.11.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1914353
-/// [7.11.5]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1640997
-#[derive(Debug, Clone, PartialEq)]
-pub enum FileSpec {
-    /// Local filesystem path (e.g., `/Docs/path/file.pdf`, `path/file.pdf`, or `../file.pdf`).
-    ///
-    /// This variant accepts a UTF-8 string, covering the full Unicode range.
-    ///
-    /// When serialized to PDF, this is stored in the `UF` (Unicode File) entry of the
-    /// file specification dictionary (see [7.11.2.2]) encoded as UTF-16BE (per PDF 32000-1:2008,
-    /// [7.9.2.2]), ensuring cross-platform compatibility for non-ASCII filenames.
-    ///
-    /// [7.9.2.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1957385
-    /// [7.11.2.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1958046
-    Path(String),
-
-    /// URL-based file specification (e.g., `http://example.com/file.pdf`).
-    ///
-    /// **Constraint:** Must be a 7-bit ASCII string (per PDF 32000-1:2008, [7.11.5]).
-    ///
-    /// Any characters that are not representable in 7-bit U.S. ASCII or are considered
-    /// unsafe according to RFC 1738 must be percent-encoded (escaped).
-    ///
-    /// Note that for relative URL-based specifications, RFC 1808 rules apply, and
-    /// sections such as scheme, query, or fragment are not allowed (per PDF 32000-1:2008, [7.11.2.2]).
-    ///
-    /// [7.11.2.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1958046
-    /// [7.11.5]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1640997
-    Url(String),
-}
-
-impl fmt::Display for FileSpec {
-    /// Formats this file specification as a [MuPDF-compatible] URI string.
-    ///
-    /// Follows MuPDF's [`convert_file_spec_to_URI`] logic:
-    /// - `FileSpec::Path` -> `file://<percent-encoded path>` (absolute) or `file:<percent-encoded path>` (relative)
-    /// - `FileSpec::Url` -> the URL string as-is
-    ///
-    /// [`convert_file_spec_to_URI`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L288
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FileSpec::Path(path) => {
-                let prefix = if path.starts_with('/') {
-                    "file://"
-                } else {
-                    "file:"
-                };
-                write!(f, "{prefix}{}", utf8_percent_encode(path, URI_PATH_SET))
-            }
-            FileSpec::Url(url) => f.write_str(url),
-        }
-    }
-}
-
-/// Destination within a PDF document (see [PDF 32000-1:2008, 12.3.2]).
-///
-/// Represents the `D` entry in both `GoTo` and `GoToR` [`PdfAction`] or
-/// `Dest` entry in [`LinkAction`].
-///
-/// [PDF 32000-1:2008, 12.3.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.2063217
-#[derive(Debug, Clone, PartialEq)]
-pub enum PdfDestination {
-    /// Explicit destination: zero-based page number with view settings (e.g., page 0, Fit).
-    Page { page: u32, kind: DestinationKind },
-    /// Named destination string resolved in the remote document's name tree (e.g., `"Chapter1"`).
-    Named(String),
-}
-
-impl PdfDestination {
-    /// Encode as a local destination (for `/GoTo` actions and direct `/Dest` entries).
-    ///
-    /// - `Page { page, kind }`: resolves page to indirect ref via `resolver`,
-    ///   transforms coordinates from Fitz space to PDF user space, and builds
-    ///   the destination array `[page_ref, /Kind, params...]`.
-    /// - `Named(name)`: returns a PDF string object.
-    pub(crate) fn encode_local(
-        &self,
-        doc: &mut PdfDocument,
-        resolver: &mut impl DestPageResolver,
-    ) -> Result<PdfObject, Error> {
-        match self {
-            PdfDestination::Page { page, kind } => {
-                // MuPDF: GoTo action + explicit destination array
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1315
-                let mut dest = doc.new_array_with_capacity(6)?;
-                let (dest_page_obj, dest_inv_ctm) = resolver.resolve(doc, *page)?;
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1325
-                dest.array_push_ref(dest_page_obj)?;
-
-                // MuPDF uses inv_ctm to transform coordinates
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1328
-                let dest_kind = dest_inv_ctm
-                    .as_ref()
-                    .map(|inv_ctm| kind.transform(inv_ctm))
-                    .unwrap_or(*kind);
-                dest_kind.encode_into(&mut dest)?;
-                Ok(dest)
-            }
-            // MuPDF stores the named destination as-is
-            // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1297
-            // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1192
-            PdfDestination::Named(name) => PdfObject::new_string(name),
-        }
-    }
-
-    /// Encode as a remote destination (for `/GoToR` actions).
-    ///
-    /// - `Page { page, kind }`: pushes page as integer, encodes kind as-is
-    ///   (coordinates are already in PDF default user space).
-    /// - `Named(name)`: returns a PDF string object.
-    pub(crate) fn encode_remote(&self, doc: &mut PdfDocument) -> Result<PdfObject, Error> {
-        match self {
-            PdfDestination::Page { page, kind } => {
-                let mut dest = doc.new_array_with_capacity(6)?;
-                // Push the page as-is.
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1319
-                dest.array_push(PdfObject::new_int(*page as i32)?)?;
-                // MuPDF uses an identity matrix to transform coordinates, but we could just not do that
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1320
-                kind.encode_into(&mut dest)?;
-                Ok(dest)
-            }
-            // same as PdfDestination::Named(_) in encode_local
-            PdfDestination::Named(name) => PdfObject::new_string(name),
-        }
-    }
-}
-
-impl Default for PdfDestination {
-    fn default() -> Self {
-        Self::Page {
-            page: 0,
-            kind: DestinationKind::default(),
-        }
-    }
-}
-
-impl fmt::Display for PdfDestination {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PdfDestination::Page { page, kind } => {
-                write!(f, "page={}{kind}", page.saturating_add(1))
-            }
-            PdfDestination::Named(name) => {
-                // MuPDF: pdf_append_named_dest_to_uri
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1023
-                write!(
-                    f,
-                    "nameddest={}",
-                    utf8_percent_encode(name, URI_COMPONENT_SET)
-                )
-            }
-        }
-    }
-}
-
 impl PdfAction {
     /// Convenience method that returns the [`Display`](fmt::Display) output as an owned `String`.
     ///
@@ -424,6 +261,214 @@ impl fmt::Display for PdfAction {
                     _ => '#',
                 };
                 write!(f, "{file}{sep}{dest}")
+            }
+        }
+    }
+}
+
+/// PDF file specification (see [PDF 32000-1:2008, 7.11]).
+///
+/// Represents a file reference that can be either a local filesystem path
+/// (absolute or relative, per [7.11.2]) or a URL-based reference (when `FS` is `URL`,
+/// per [7.11.5]).
+///
+/// [PDF 32000-1:2008, 7.11]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1640832
+/// [7.11.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1914353
+/// [7.11.5]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1640997
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileSpec {
+    /// Local filesystem path (e.g., `/Docs/path/file.pdf`, `path/file.pdf`, or `../file.pdf`).
+    ///
+    /// This variant accepts a UTF-8 string, covering the full Unicode range.
+    ///
+    /// When serialized to PDF, this is stored in the `UF` (Unicode File) entry of the
+    /// file specification dictionary (see [7.11.2.2]) encoded as UTF-16BE (per PDF 32000-1:2008,
+    /// [7.9.2.2]), ensuring cross-platform compatibility for non-ASCII filenames.
+    ///
+    /// [7.9.2.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1957385
+    /// [7.11.2.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1958046
+    Path(String),
+
+    /// URL-based file specification (e.g., `http://example.com/file.pdf`).
+    ///
+    /// **Constraint:** Must be a 7-bit ASCII string (per PDF 32000-1:2008, [7.11.5]).
+    ///
+    /// Any characters that are not representable in 7-bit U.S. ASCII or are considered
+    /// unsafe according to RFC 1738 must be percent-encoded (escaped).
+    ///
+    /// Note that for relative URL-based specifications, RFC 1808 rules apply, and
+    /// sections such as scheme, query, or fragment are not allowed (per PDF 32000-1:2008, [7.11.2.2]).
+    ///
+    /// [7.11.2.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1958046
+    /// [7.11.5]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1640997
+    Url(String),
+}
+
+impl FileSpec {
+    /// Encodes this file specification as a PDF file specification dictionary
+    /// (see [PDF 32000-1:2008, 7.11]) and adds it as an indirect object.
+    ///
+    /// - `Path`: creates a dict with `/Type /Filespec`, `/F` (ASCII-safe), `/UF` (Unicode).
+    ///   Rust analogue of MuPDF's [`pdf_add_filespec`].
+    /// - `Url`: creates a dict with `/Type /Filespec`, `/FS /URL`, `/F`.
+    ///   Rust analogue of MuPDF's [`pdf_add_url_filespec`].
+    ///
+    /// [PDF 32000-1:2008, 7.11]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G6.1640832
+    /// [`pdf_add_filespec`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1223
+    /// [`pdf_add_url_filespec`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1268
+    pub(crate) fn encode_into(&self, doc: &mut PdfDocument) -> Result<PdfObject, Error> {
+        match self {
+            FileSpec::Path(path) => {
+                let mut spec = doc.new_dict_with_capacity(3)?;
+                spec.dict_put("Type", PdfObject::new_name("Filespec")?)?;
+                let asciiname: String = path
+                    .chars()
+                    .map(|c| if matches!(c, ' '..='~') { c } else { '_' })
+                    .collect();
+                spec.dict_put("F", PdfObject::new_string(&asciiname)?)?;
+                spec.dict_put("UF", PdfObject::new_string(path)?)?;
+                // MuPDF uses pdf_add_new_dict which creates an indirect object (pdf-link.c:1249)
+                doc.add_object(&spec)
+            }
+            FileSpec::Url(url) => {
+                let mut spec = doc.new_dict_with_capacity(3)?;
+                spec.dict_put("Type", PdfObject::new_name("Filespec")?)?;
+                spec.dict_put("FS", PdfObject::new_name("URL")?)?;
+                spec.dict_put("F", PdfObject::new_string(url)?)?;
+                // MuPDF uses pdf_add_new_dict which creates an indirect object (pdf-link.c:1268)
+                doc.add_object(&spec)
+            }
+        }
+    }
+}
+
+impl fmt::Display for FileSpec {
+    /// Formats this file specification as a [MuPDF-compatible] URI string.
+    ///
+    /// Follows MuPDF's [`convert_file_spec_to_URI`] logic:
+    /// - `FileSpec::Path` -> `file://<percent-encoded path>` (absolute) or `file:<percent-encoded path>` (relative)
+    /// - `FileSpec::Url` -> the URL string as-is
+    ///
+    /// [`convert_file_spec_to_URI`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L288
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileSpec::Path(path) => {
+                let prefix = if path.starts_with('/') {
+                    "file://"
+                } else {
+                    "file:"
+                };
+                write!(f, "{prefix}{}", utf8_percent_encode(path, URI_PATH_SET))
+            }
+            FileSpec::Url(url) => f.write_str(url),
+        }
+    }
+}
+
+/// Destination within a PDF document (see [PDF 32000-1:2008, 12.3.2]).
+///
+/// Represents the `D` entry in both `GoTo` and `GoToR` [`PdfAction`] or
+/// `Dest` entry in [`LinkAction`].
+///
+/// [PDF 32000-1:2008, 12.3.2]: https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf#G11.2063217
+#[derive(Debug, Clone, PartialEq)]
+pub enum PdfDestination {
+    /// Explicit destination: zero-based page number with view settings (e.g., page 0, Fit).
+    Page { page: u32, kind: DestinationKind },
+    /// Named destination string resolved in the remote document's name tree (e.g., `"Chapter1"`).
+    Named(String),
+}
+
+impl PdfDestination {
+    /// Convenience method that returns the [`Display`](fmt::Display) output as an owned `String`.
+    ///
+    /// See [`fmt::Display`] impl for output format details and MuPDF source references.
+    pub fn to_uri(&self) -> String {
+        self.to_string()
+    }
+
+    /// Encode as a local destination (for `/GoTo` actions and direct `/Dest` entries).
+    ///
+    /// - `Page { page, kind }`: resolves page to indirect ref via `resolver`,
+    ///   transforms coordinates from Fitz space to PDF user space, and builds
+    ///   the destination array `[page_ref, /Kind, params...]`.
+    /// - `Named(name)`: returns a PDF string object.
+    pub(crate) fn encode_local(
+        &self,
+        doc: &mut PdfDocument,
+        resolver: &mut impl DestPageResolver,
+    ) -> Result<PdfObject, Error> {
+        match self {
+            PdfDestination::Page { page, kind } => {
+                // MuPDF: GoTo action + explicit destination array
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1315
+                let mut dest = doc.new_array_with_capacity(6)?;
+                let (dest_page_obj, dest_inv_ctm) = resolver.resolve(doc, *page)?;
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1325
+                dest.array_push_ref(dest_page_obj)?;
+
+                // MuPDF uses inv_ctm to transform coordinates
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1328
+                let dest_kind = dest_inv_ctm
+                    .as_ref()
+                    .map(|inv_ctm| kind.transform(inv_ctm))
+                    .unwrap_or(*kind);
+                dest_kind.encode_into(&mut dest)?;
+                Ok(dest)
+            }
+            // MuPDF stores the named destination as-is
+            // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1297
+            // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1192
+            PdfDestination::Named(name) => PdfObject::new_string(name),
+        }
+    }
+
+    /// Encode as a remote destination (for `/GoToR` actions).
+    ///
+    /// - `Page { page, kind }`: pushes page as integer, encodes kind as-is
+    ///   (coordinates are already in PDF default user space).
+    /// - `Named(name)`: returns a PDF string object.
+    pub(crate) fn encode_remote(&self, doc: &mut PdfDocument) -> Result<PdfObject, Error> {
+        match self {
+            PdfDestination::Page { page, kind } => {
+                let mut dest = doc.new_array_with_capacity(6)?;
+                // Push the page as-is.
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1319
+                dest.array_push(PdfObject::new_int(*page as i32)?)?;
+                // MuPDF uses an identity matrix to transform coordinates, but we could just not do that
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1320
+                kind.encode_into(&mut dest)?;
+                Ok(dest)
+            }
+            // same as PdfDestination::Named(_) in encode_local
+            PdfDestination::Named(name) => PdfObject::new_string(name),
+        }
+    }
+}
+
+impl Default for PdfDestination {
+    fn default() -> Self {
+        Self::Page {
+            page: 0,
+            kind: DestinationKind::default(),
+        }
+    }
+}
+
+impl fmt::Display for PdfDestination {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PdfDestination::Page { page, kind } => {
+                write!(f, "page={}{kind}", page.saturating_add(1))
+            }
+            PdfDestination::Named(name) => {
+                // MuPDF: pdf_append_named_dest_to_uri
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1023
+                write!(
+                    f,
+                    "nameddest={}",
+                    utf8_percent_encode(name, URI_COMPONENT_SET)
+                )
             }
         }
     }
