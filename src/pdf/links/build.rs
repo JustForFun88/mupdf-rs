@@ -126,40 +126,14 @@ pub(crate) fn set_action_on_annot_dict(
     resolver: &mut impl DestPageResolver,
 ) -> Result<(), Error> {
     match action {
-        PdfAction::GoTo(dest) => match dest {
-            PdfDestination::Page { page, kind } => {
-                // MuPDF: GoTo action + explicit destination array
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1315
-                let mut dest = doc.new_array_with_capacity(6)?;
-
-                let (dest_page_obj, dest_inv_ctm) = resolver.resolve(doc, *page)?;
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1325
-                dest.array_push_ref(dest_page_obj)?;
-
-                // MuPDF uses inv_ctm to transform coodinates
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1328
-                let dest_kind = dest_inv_ctm
-                    .as_ref()
-                    .map(|inv_ctm| kind.transform(inv_ctm))
-                    .unwrap_or(*kind);
-                dest_kind.encode_into(&mut dest)?;
-
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1191
-                let mut action = doc.new_dict_with_capacity(2)?;
-                action.dict_put("S", PdfObject::new_name("GoTo")?)?;
-                action.dict_put("D", dest)?;
-                annot.dict_put("A", action)
-            }
-            PdfDestination::Named(name) => {
-                let mut action = doc.new_dict_with_capacity(2)?;
-                action.dict_put("S", PdfObject::new_name("GoTo")?)?;
-                // MuPDF stores the named destination as-is
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1297
-                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1192
-                action.dict_put("D", PdfObject::new_string(name)?)?;
-                annot.dict_put("A", action)
-            }
-        },
+        PdfAction::GoTo(dest) => {
+            let dest_obj = dest.encode_local(doc, resolver)?;
+            // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1191
+            let mut action = doc.new_dict_with_capacity(2)?;
+            action.dict_put("S", PdfObject::new_name("GoTo")?)?;
+            action.dict_put("D", dest_obj)?;
+            annot.dict_put("A", action)
+        }
         PdfAction::Uri(uri) => {
             // MuPDF reads a URI action and stores the URI string as-is, since URI entries are ASCII strings
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L545
@@ -174,23 +148,8 @@ pub(crate) fn set_action_on_annot_dict(
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1197
             let mut action = doc.new_dict_with_capacity(3)?;
             action.dict_put("S", PdfObject::new_name("GoToR")?)?;
-
-            match dest {
-                PdfDestination::Page { page, kind } => {
-                    let mut dest = doc.new_array_with_capacity(6)?;
-                    // Push the page as-is.
-                    // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1319
-                    dest.array_push(PdfObject::new_int(*page as i32)?)?;
-                    // MuPDF uses an identity matrix to transform coordinates, but we could just not do that
-                    // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1320
-                    kind.encode_into(&mut dest)?;
-                    action.dict_put("D", dest)?;
-                }
-                PdfDestination::Named(name) => {
-                    // same as PdfDestination::Named(_)
-                    action.dict_put("D", PdfObject::new_string(name)?)?;
-                }
-            }
+            let dest_obj = dest.encode_remote(doc)?;
+            action.dict_put("D", dest_obj)?;
 
             // Same as MuPDF `pdf_add_filespec_from_link` function
             // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1152
@@ -233,24 +192,8 @@ fn set_dest_on_annot_dict(
     dest: &PdfDestination,
     resolver: &mut impl DestPageResolver,
 ) -> Result<(), Error> {
-    match dest {
-        PdfDestination::Page { page, kind } => {
-            let mut dest = doc.new_array_with_capacity(6)?;
-
-            let (dest_page_obj, dest_inv_ctm) = resolver.resolve(doc, *page)?;
-
-            dest.array_push_ref(dest_page_obj)?;
-
-            let dest_kind = dest_inv_ctm
-                .as_ref()
-                .map(|inv_ctm| kind.transform(inv_ctm))
-                .unwrap_or(*kind);
-            dest_kind.encode_into(&mut dest)?;
-
-            annot.dict_put("Dest", dest)
-        }
-        PdfDestination::Named(name) => annot.dict_put("Dest", PdfObject::new_string(name)?),
-    }
+    let dest_obj = dest.encode_local(doc, resolver)?;
+    annot.dict_put("Dest", dest_obj)
 }
 
 /// This is the Rust analogue of MuPDF's logic found in `pdf_add_filespec` function

@@ -245,6 +245,66 @@ pub enum PdfDestination {
     Named(String),
 }
 
+impl PdfDestination {
+    /// Encode as a local destination (for `/GoTo` actions and direct `/Dest` entries).
+    ///
+    /// - `Page { page, kind }`: resolves page to indirect ref via `resolver`,
+    ///   transforms coordinates from Fitz space to PDF user space, and builds
+    ///   the destination array `[page_ref, /Kind, params...]`.
+    /// - `Named(name)`: returns a PDF string object.
+    pub(crate) fn encode_local(
+        &self,
+        doc: &mut PdfDocument,
+        resolver: &mut impl DestPageResolver,
+    ) -> Result<PdfObject, Error> {
+        match self {
+            PdfDestination::Page { page, kind } => {
+                // MuPDF: GoTo action + explicit destination array
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1315
+                let mut dest = doc.new_array_with_capacity(6)?;
+                let (dest_page_obj, dest_inv_ctm) = resolver.resolve(doc, *page)?;
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1325
+                dest.array_push_ref(dest_page_obj)?;
+
+                // MuPDF uses inv_ctm to transform coordinates
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1328
+                let dest_kind = dest_inv_ctm
+                    .as_ref()
+                    .map(|inv_ctm| kind.transform(inv_ctm))
+                    .unwrap_or(*kind);
+                dest_kind.encode_into(&mut dest)?;
+                Ok(dest)
+            }
+            // MuPDF stores the named destination as-is
+            // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1297
+            // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1192
+            PdfDestination::Named(name) => PdfObject::new_string(name),
+        }
+    }
+
+    /// Encode as a remote destination (for `/GoToR` actions).
+    ///
+    /// - `Page { page, kind }`: pushes page as integer, encodes kind as-is
+    ///   (coordinates are already in PDF default user space).
+    /// - `Named(name)`: returns a PDF string object.
+    pub(crate) fn encode_remote(&self, doc: &mut PdfDocument) -> Result<PdfObject, Error> {
+        match self {
+            PdfDestination::Page { page, kind } => {
+                let mut dest = doc.new_array_with_capacity(6)?;
+                // Push the page as-is.
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1319
+                dest.array_push(PdfObject::new_int(*page as i32)?)?;
+                // MuPDF uses an identity matrix to transform coordinates, but we could just not do that
+                // https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1320
+                kind.encode_into(&mut dest)?;
+                Ok(dest)
+            }
+            // same as PdfDestination::Named(_) in encode_local
+            PdfDestination::Named(name) => PdfObject::new_string(name),
+        }
+    }
+}
+
 impl Default for PdfDestination {
     fn default() -> Self {
         Self::Page {
