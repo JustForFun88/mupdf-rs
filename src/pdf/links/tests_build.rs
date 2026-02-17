@@ -151,6 +151,27 @@ impl PdfPage {
 
         Ok(output)
     }
+
+    /// Equivalent to [`PdfPage::pdf_links`] collected into a `Vec`, but relies exclusively
+    /// on the [`crate::pdf::annotation::PdfAnnotation::get_link_action`] implementation for testing purposes.
+    fn get_annotations_as_pdf_links(&self) -> Result<Vec<PdfLink>, Error> {
+        use mupdf_sys::*;
+
+        let doc_ptr =
+            NonNull::new(unsafe { (*self.inner.as_ptr()).doc }).ok_or(Error::UnexpectedNullPtr)?;
+        let doc = unsafe { PdfDocument::from_raw(pdf_keep_document(context(), doc_ptr.as_ptr())) };
+
+        self.annotations()
+            .try_fold(Vec::new(), |mut acc, annotation| {
+                let action_opt = annotation.get_link_action(&doc, None)?;
+                if let Some(action) = action_opt {
+                    let bounds = annotation.rect()?;
+
+                    acc.push(PdfLink { bounds, action });
+                }
+                Ok(acc)
+            })
+    }
 }
 
 /// Create a PDF document with the specified number of pages and add links on page 0.
@@ -198,7 +219,7 @@ fn add_named_destinations(doc: &mut PdfDocument, names: &[&str]) -> Result<(), c
     Ok(())
 }
 
-/// Extract links from page 0 of a PDF using standard `pdf_links`.
+/// Extract links from page 0 of a PDF using standard [`PdfPage::pdf_links`].
 fn extract_links(pdf: &PdfDocument) -> Result<Vec<PdfLink>, TestError> {
     let page = pdf
         .load_pdf_page(0)
@@ -210,13 +231,24 @@ fn extract_links(pdf: &PdfDocument) -> Result<Vec<PdfLink>, TestError> {
         .map_err(|e| TestError::new("[pdf_links] Collection failed", e))
 }
 
-/// Extract links from page 0 using Rust parsing logic ([`parse_external_link`])
+/// Extract links from page 0 using Rust [`parse_external_link`] parsing logic
 fn extract_rust_parsed_links(pdf: &PdfDocument) -> Result<Vec<PdfLink>, TestError> {
     let page = pdf
         .load_pdf_page(0)
         .map_err(|e| TestError::new("[rust_parsed] Page 0 load failed", e))?;
 
     page.pdf_links_rust_parsed()
+        .map_err(|e| TestError::new("[rust_parsed] Extraction failed", e))
+}
+
+/// Extract links from page 0 using Rust [`crate::pdf::annotation::PdfAnnotation::get_link_action`]
+/// parsing logic
+fn extract_annotations_as_pdf_links(pdf: &PdfDocument) -> Result<Vec<PdfLink>, TestError> {
+    let page = pdf
+        .load_pdf_page(0)
+        .map_err(|e| TestError::new("[rust_parsed] Page 0 load failed", e))?;
+
+    page.get_annotations_as_pdf_links()
         .map_err(|e| TestError::new("[rust_parsed] Extraction failed", e))
 }
 
@@ -253,7 +285,11 @@ fn assert_links_match(pdf: &PdfDocument, expected_vec: &[PdfLink]) -> Result<(),
     };
 
     verify(&extract_links(pdf)?, "[pdf_links] ")?;
-    verify(&extract_rust_parsed_links(pdf)?, "[rust_parsed] ")
+    verify(&extract_rust_parsed_links(pdf)?, "[rust_parsed] ")?;
+    verify(
+        &extract_annotations_as_pdf_links(pdf)?,
+        "[annotations_as_pdf_links] ",
+    )
 }
 
 fn assert_raw_uri_matches(pdf: &PdfDocument, expected_vec: &[PdfLink]) -> Result<(), TestError> {
