@@ -175,7 +175,6 @@ impl PdfPage {
 }
 
 /// Create a PDF document with the specified number of pages and add links on page 0.
-/// Returns the PDF as bytes.
 fn create_pdf_with_links(page_count: usize, links: &[PdfLink]) -> PdfDocument {
     assert!(page_count > 0, "page_count must be > 0");
 
