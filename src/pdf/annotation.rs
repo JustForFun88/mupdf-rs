@@ -5,7 +5,6 @@ use std::{
 
 use mupdf_sys::*;
 
-use crate::pdf::PdfObject;
 use crate::{color::AnnotationColor, pdf::Intent};
 use crate::{context, from_enum, Error};
 use crate::{pdf::PdfFilterOptions, Point, Rect};
@@ -71,12 +70,6 @@ impl PdfAnnotation {
         Self { inner: ptr }
     }
 
-    /// Returns the underlying PDF object dictionary for this annotation.
-    pub fn obj(&self) -> Result<PdfObject, Error> {
-        let ptr = unsafe { ffi_try!(mupdf_pdf_annot_obj(context(), self.inner)) }?;
-        Ok(unsafe { PdfObject::from_raw_keep_ref(ptr) })
-    }
-
     /// Get the [`PdfAnnotationType`] of this annotation
     pub fn r#type(&self) -> Result<PdfAnnotationType, Error> {
         unsafe { ffi_try!(mupdf_pdf_annot_type(context(), self.inner)) }.map(|subtype| {
@@ -100,14 +93,6 @@ impl PdfAnnotation {
         unsafe { pdf_annot_active(context(), self.inner) != 0 }
     }
 
-    /// Get the start and end points of a Line annotation
-    pub fn line(&self) -> Result<(Point, Point), Error> {
-        let mut a = fz_point { x: 0.0, y: 0.0 };
-        let mut b = fz_point { x: 0.0, y: 0.0 };
-        unsafe { ffi_try!(mupdf_pdf_annot_line(context(), self.inner, &mut a, &mut b)) }?;
-        Ok((Point::from(a), Point::from(b)))
-    }
-
     pub fn set_line(&mut self, start: Point, end: Point) -> Result<(), Error> {
         unsafe {
             ffi_try!(mupdf_pdf_set_annot_line(
@@ -116,36 +101,6 @@ impl PdfAnnotation {
                 start.into(),
                 end.into()
             ))
-        }
-    }
-
-    /// Get the color of the annotation, or `None` if no color is set
-    pub fn color(&self) -> Result<Option<AnnotationColor>, Error> {
-        let mut n: c_int = 0;
-        let mut color = [0.0f32; 4];
-        unsafe {
-            ffi_try!(mupdf_pdf_annot_color(
-                context(),
-                self.inner,
-                &mut n,
-                color.as_mut_ptr()
-            ))
-        }?;
-        match n {
-            0 => Ok(None),
-            1 => Ok(Some(AnnotationColor::Gray(color[0]))),
-            3 => Ok(Some(AnnotationColor::Rgb {
-                red: color[0],
-                green: color[1],
-                blue: color[2],
-            })),
-            4 => Ok(Some(AnnotationColor::Cmyk {
-                cyan: color[0],
-                magenta: color[1],
-                yellow: color[2],
-                key: color[3],
-            })),
-            _ => Ok(None),
         }
     }
 
@@ -179,11 +134,6 @@ impl PdfAnnotation {
         }
     }
 
-    pub fn flags(&self) -> Result<AnnotationFlags, Error> {
-        let flags = unsafe { ffi_try!(mupdf_pdf_annot_flags(context(), self.inner)) }?;
-        Ok(AnnotationFlags::from_bits_truncate(flags))
-    }
-
     pub fn set_flags(&mut self, flags: AnnotationFlags) -> Result<(), Error> {
         unsafe {
             ffi_try!(mupdf_pdf_set_annot_flags(
@@ -192,12 +142,6 @@ impl PdfAnnotation {
                 flags.bits()
             ))
         }
-    }
-
-    /// Get the bounding box of the annotation
-    pub fn rect(&self) -> Result<Rect, Error> {
-        let rect = unsafe { ffi_try!(mupdf_pdf_annot_rect(context(), self.inner)) }?;
-        Ok(Rect::from(rect))
     }
 
     /// Set the bounding box of the annotation
@@ -235,12 +179,6 @@ impl PdfAnnotation {
         }
     }
 
-    /// Get the popup rectangle of the annotation
-    pub fn popup(&self) -> Result<Rect, Error> {
-        let rect = unsafe { ffi_try!(mupdf_pdf_annot_popup(context(), self.inner)) }?;
-        Ok(Rect::from(rect))
-    }
-
     pub fn set_popup(&mut self, rect: Rect) -> Result<(), Error> {
         unsafe {
             ffi_try!(mupdf_pdf_set_annot_popup(
@@ -261,10 +199,6 @@ impl PdfAnnotation {
         }
     }
 
-    pub fn border_width(&self) -> Result<f32, Error> {
-        unsafe { ffi_try!(mupdf_pdf_annot_border_width(context(), self.inner)) }
-    }
-
     pub fn set_border_width(&mut self, width: f32) -> Result<(), Error> {
         unsafe {
             ffi_try!(mupdf_pdf_set_annot_border_width(
@@ -273,11 +207,6 @@ impl PdfAnnotation {
                 width
             ))
         }
-    }
-
-    pub fn intent(&self) -> Result<Intent, Error> {
-        let intent = unsafe { ffi_try!(mupdf_pdf_annot_intent(context(), self.inner)) }?;
-        Intent::try_from(intent).map_err(|_| Error::UnknownEnumVariant)
     }
 
     pub fn set_intent(&mut self, intent: Intent) -> Result<(), Error> {
@@ -289,7 +218,6 @@ impl PdfAnnotation {
             ))
         }
     }
-
 }
 
 impl Drop for PdfAnnotation {
