@@ -488,7 +488,7 @@ pub trait DestPageResolver {
         &mut self,
         doc: &PdfDocument,
         page_num: u32,
-    ) -> Result<(&PdfObject, &Option<Matrix>), Error>;
+    ) -> Result<(&PdfObject, Option<&Matrix>), Error>;
 }
 
 /// Resolver for bulk operations. Caches pages in a HashMap.
@@ -505,17 +505,17 @@ where
         &mut self,
         doc: &PdfDocument,
         page_num: u32,
-    ) -> Result<(&PdfObject, &Option<Matrix>), Error> {
+    ) -> Result<(&PdfObject, Option<&Matrix>), Error> {
         match self.cache.entry(page_num) {
             Entry::Occupied(entry) => {
                 let (obj, mat) = entry.into_mut();
-                Ok((obj, mat))
+                Ok((obj, mat.as_ref()))
             }
             Entry::Vacant(entry) => {
                 let page_obj = doc.find_page(page_num as i32)?;
                 let inv_ctm = (self.fn_dest_inv_ctm)(&page_obj)?;
                 let (obj, mat) = entry.insert((page_obj, inv_ctm));
-                Ok((obj, mat))
+                Ok((obj, mat.as_ref()))
             }
         }
     }
@@ -544,10 +544,10 @@ where
         &mut self,
         doc: &PdfDocument,
         page_num: u32,
-    ) -> Result<(&PdfObject, &Option<Matrix>), Error> {
+    ) -> Result<(&PdfObject, Option<&Matrix>), Error> {
         let page_obj = doc.find_page(page_num as i32)?;
         let inv_ctm = (self.fn_dest_inv_ctm)(&page_obj)?;
         let (obj, mat) = self.slot.insert((page_obj, inv_ctm));
-        Ok((obj, mat))
+        Ok((obj, mat.as_ref()))
     }
 }

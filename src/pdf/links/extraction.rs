@@ -558,6 +558,7 @@ fn parse_dest_array(array: &PdfObject, doc: &PdfDocument) -> Result<PdfDestinati
 
     let mut kind = DestinationKind::decode_from(array)?;
 
+    // TODO: Find a way to use DestinationKind::transform here.
     if page_obj.is_dict()? {
         let ctm = page_obj.page_ctm()?;
         kind = match kind {

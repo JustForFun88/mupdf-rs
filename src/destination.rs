@@ -391,9 +391,7 @@ impl DestinationKind {
         fn read_float(array: &PdfObject, idx: i32) -> Result<f32, Error> {
             array
                 .get_array(idx)?
-                .ok_or_else(|| {
-                    Error::InvalidDestination(format!("missing required float at index {idx}"))
-                })?
+                .ok_or_else(|| Error::InvalidDestination(format!("missing float at index {idx}")))?
                 .as_float()
         }
 

@@ -35,14 +35,15 @@ impl PdfLinkAnnot {
     ///
     /// Returns `Ok(None)` if the annotation has no recognizable action entry.
     ///
-    /// `page_num` is the 0-based page number where this annotation lives, used to resolve
+    /// `page_num` is the 0-based page number where this annotation resides, used to resolve
     /// relative `Named` actions (`PrevPage`, `NextPage`). Pass `None` if the page number is
-    /// unknown; absolute named actions (`FirstPage`, `LastPage`) will still be resolved.
+    /// unknown. Absolute named actions (`FirstPage`, `LastPage`) are always resolved.
     ///
     /// Unlike [`PdfPage::pdf_links`](crate::pdf::PdfPage::pdf_links), this method:
-    /// - Does **not** resolve named destinations to concrete page numbers
-    /// - Preserves the `Launch(FileSpec::Url)` vs `Uri` distinction
+    /// - Does not resolve named destinations to concrete page numbers
+    /// - Preserves `Launch` actions exactly as specified in the PDF document
     /// - Preserves whether the original entry was `/Dest` or `/A`
+    /// - Does not clamp coordinates to the page bounds
     pub fn action(
         &self,
         doc: &PdfDocument,
@@ -94,11 +95,7 @@ impl PdfLinkAnnot {
     ///
     /// For bulk updates targeting many pages, prefer [`set_action_with_resolver`](Self::set_action_with_resolver)
     /// with a [`CachedResolver`](super::CachedResolver) to avoid redundant page lookups.
-    pub fn set_action(
-        &mut self,
-        doc: &mut PdfDocument,
-        action: &LinkAction,
-    ) -> Result<(), Error> {
+    pub fn set_action(&mut self, doc: &mut PdfDocument, action: &LinkAction) -> Result<(), Error> {
         let mut resolver =
             SingleResolver::new(|page_obj: &PdfObject| Ok(page_obj.page_ctm()?.invert()));
         self.set_action_with_resolver(doc, action, &mut resolver)

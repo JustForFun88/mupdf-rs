@@ -100,10 +100,7 @@ pub(crate) fn set_link_action_on_annot_dict(
         LinkAction::Action(pdf_action) => {
             set_action_on_annot_dict(doc, annot, pdf_action, resolver)
         }
-        LinkAction::Dest(dest) => {
-            let dest_obj = dest.encode_local(doc, resolver)?;
-            annot.dict_put("Dest", dest_obj)
-        }
+        LinkAction::Dest(dest) => annot.dict_put("Dest", dest.encode_local(doc, resolver)?),
     }
 }
 
