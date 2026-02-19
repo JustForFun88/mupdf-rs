@@ -151,27 +151,6 @@ impl PdfPage {
 
         Ok(output)
     }
-
-    /// Equivalent to [`PdfPage::pdf_links`] collected into a `Vec`, but relies exclusively
-    /// on the [`crate::pdf::annotation::PdfAnnotation::get_link_action`] implementation for testing purposes.
-    fn get_annotations_as_pdf_links(&self) -> Result<Vec<PdfLink>, Error> {
-        use mupdf_sys::*;
-
-        let doc_ptr =
-            NonNull::new(unsafe { (*self.inner.as_ptr()).doc }).ok_or(Error::UnexpectedNullPtr)?;
-        let doc = unsafe { PdfDocument::from_raw(pdf_keep_document(context(), doc_ptr.as_ptr())) };
-
-        self.annotations()
-            .try_fold(Vec::new(), |mut acc, annotation| {
-                let action_opt = annotation.get_link_action(&doc, None)?;
-                if let Some(action) = action_opt {
-                    let bounds = annotation.rect()?;
-
-                    acc.push(PdfLink { bounds, action });
-                }
-                Ok(acc)
-            })
-    }
 }
 
 /// Create a PDF document with the specified number of pages and add links on page 0.
@@ -240,15 +219,14 @@ fn extract_rust_parsed_links(pdf: &PdfDocument) -> Result<Vec<PdfLink>, TestErro
         .map_err(|e| TestError::new("[rust_parsed] Extraction failed", e))
 }
 
-/// Extract links from page 0 using Rust [`crate::pdf::annotation::PdfAnnotation::get_link_action`]
-/// parsing logic
+/// Extract links from page 0 using [`PdfPage::get_links_from_annots`] (direct `/Annots` read).
 fn extract_annotations_as_pdf_links(pdf: &PdfDocument) -> Result<Vec<PdfLink>, TestError> {
     let page = pdf
         .load_pdf_page(0)
-        .map_err(|e| TestError::new("[rust_parsed] Page 0 load failed", e))?;
+        .map_err(|e| TestError::new("[link_annots] Page 0 load failed", e))?;
 
-    page.get_annotations_as_pdf_links()
-        .map_err(|e| TestError::new("[rust_parsed] Extraction failed", e))
+    page.get_links_from_annots(pdf, None)
+        .map_err(|e| TestError::new("[link_annots] Extraction failed", e))
 }
 
 /// Extract raw URI strings from page 0.
@@ -285,9 +263,54 @@ fn assert_links_match(pdf: &PdfDocument, expected_vec: &[PdfLink]) -> Result<(),
 
     verify(&extract_links(pdf)?, "[pdf_links] ")?;
     verify(&extract_rust_parsed_links(pdf)?, "[rust_parsed] ")?;
+    verify(&extract_annotations_as_pdf_links(pdf)?, "[link_annots] ")
+}
+
+/// Like [`assert_links_match`] but allows a separate expected vector for the
+/// `[link_annots]` check.
+///
+/// Use this when [`PdfPage::get_links_from_annots`] (structure-preserving) produces
+/// different output than the URI-flattening paths (`pdf_links`, `rust_parsed`).
+/// Common cases:
+/// - Named destinations are preserved as `Named(name)` (not resolved to page numbers)
+/// - File paths are returned as stored (not normalized via `cleanname`)
+/// - `GoToR { file: Url(...#fragment), dest }` stays as `GoToR` (not collapsed to `Uri`)
+fn assert_links_match_split(
+    pdf: &PdfDocument,
+    expected_fz: &[PdfLink],
+    expected_annots: &[PdfLink],
+) -> Result<(), TestError> {
+    let verify =
+        |extracted: &[PdfLink], expected: &[PdfLink], label: &str| -> Result<(), TestError> {
+            if extracted.len() != expected.len() {
+                return Err(TestError::msg(format!(
+                    "{}Link count mismatch: extracted {}, expected {}",
+                    label,
+                    extracted.len(),
+                    expected.len()
+                )));
+            }
+            for (i, (extract, expect)) in extracted.iter().zip(expected.iter()).enumerate() {
+                if extract != expect {
+                    return Err(TestError::msg(format!(
+                        "{}Link '{}' mismatch:\n  extracted: {:?}\n  expected:  {:?}",
+                        label, i, extract, expect
+                    )));
+                }
+            }
+            Ok(())
+        };
+
+    verify(&extract_links(pdf)?, expected_fz, "[pdf_links] ")?;
+    verify(
+        &extract_rust_parsed_links(pdf)?,
+        expected_fz,
+        "[rust_parsed] ",
+    )?;
     verify(
         &extract_annotations_as_pdf_links(pdf)?,
-        "[annotations_as_pdf_links] ",
+        expected_annots,
+        "[link_annots] ",
     )
 }
 
@@ -921,7 +944,9 @@ fn test_named_goto_and_gotor_links() {
         })
         .collect();
 
-    assert_links_match(&pdf, &resolved_links).unwrap();
+    // URI-flattening paths resolve named dests to page numbers;
+    // link_annots preserves Named destinations as written.
+    assert_links_match_split(&pdf, &resolved_links, &links).unwrap();
     assert_raw_uri_matches(&pdf, &links).unwrap();
 
     let links = cases
@@ -1048,7 +1073,8 @@ fn test_path_links_with_launch_and_gotor() {
         .map(|path| PdfAction::Launch(FileSpec::Path(format!("{path}.docx"))))
         .create_links();
 
-    assert_links_match(&pdf, &links_with_normalized_paths).unwrap();
+    // URI-flattening paths normalize paths via cleanname; link_annots returns stored paths.
+    assert_links_match_split(&pdf, &links_with_normalized_paths, &links).unwrap();
     assert_raw_uri_matches(&pdf, &links_with_normalized_paths).unwrap();
 
     // 3b. GoToR Normalization
@@ -1071,7 +1097,8 @@ fn test_path_links_with_launch_and_gotor() {
         })
         .create_links();
 
-    assert_links_match(&pdf, &links_with_normalized_paths).unwrap();
+    // URI-flattening paths normalize paths via cleanname; link_annots returns stored paths.
+    assert_links_match_split(&pdf, &links_with_normalized_paths, &links).unwrap();
     assert_raw_uri_matches(&pdf, &links_with_normalized_paths).unwrap();
 }
 
@@ -1199,13 +1226,15 @@ fn test_gotor_url_with_existing_fragment() {
     let pdf = create_pdf_with_links(3, &links);
     assert_raw_uri_matches(&pdf, &links).unwrap();
 
-    let expected_links = [
+    // MuPDF's URI-flattening path collapses GoToR-with-URL-fragment to Uri,
+    // but link_annots preserves the original GoToR structure.
+    let expected_fz = [
         PdfAction::Uri("http://example.org/doc.pdf#pagemode=bookmarks&page=2&view=Fit".into()),
         PdfAction::Uri("http://example.org/doc.pdf#pagemode=none&nameddest=Chapter1".into()),
     ];
-    let expected_links = expected_links.create_links();
+    let expected_fz = expected_fz.create_links();
 
-    assert_links_match(&pdf, &expected_links).unwrap();
+    assert_links_match_split(&pdf, &expected_fz, &links).unwrap();
 }
 
 #[test]
@@ -1229,12 +1258,10 @@ fn test_add_links_with_wrong_document_context() {
 /// Verifies:
 /// - `/Dest` key is present in the annotation dictionary
 /// - `/A` key is absent (mutual exclusivity)
-/// - `link_action()` returns `LinkAction::Dest` variant (not `LinkAction::Action`)
+/// - `action()` returns `LinkAction::Dest` variant (not `LinkAction::Action`)
 /// - Destination data round-trips correctly
 #[test]
 fn test_link_action_dest_explicit_roundtrip() {
-    use crate::pdf::PdfAnnotationType;
-
     let mut doc = PdfDocument::new();
     for _ in 0..3 {
         doc.new_page(PAGE_SIZE).unwrap();
@@ -1267,24 +1294,24 @@ fn test_link_action_dest_explicit_roundtrip() {
         page.add_links(&mut doc, &links).unwrap();
     }
 
-    // Verify via annotation dictionary inspection
+    // Verify via link annotation dictionary inspection
     let page = doc.load_pdf_page(0).unwrap();
-    for (i, annot) in page.annotations().enumerate() {
-        assert_eq!(annot.r#type().unwrap(), PdfAnnotationType::Link);
+    let link_annots = page.link_annots().unwrap();
+    assert_eq!(link_annots.len(), links.len(), "link count mismatch");
 
-        // Check that /Dest is present and /A is absent
-        let obj = annot.obj().unwrap();
+    for (i, annot) in link_annots.iter().enumerate() {
+        // Check that /Dest is present and /A is absent (via Deref to PdfObject)
         assert!(
-            obj.get_dict("Dest").unwrap().is_some(),
+            annot.get_dict("Dest").unwrap().is_some(),
             "Link {i}: /Dest should be present"
         );
         assert!(
-            obj.get_dict("A").unwrap().is_none(),
+            annot.get_dict("A").unwrap().is_none(),
             "Link {i}: /A should be absent when /Dest is set"
         );
 
-        // Check that link_action() returns Dest variant
-        let action = annot.get_link_action(&doc, Some(0)).unwrap().unwrap();
+        // Check that action() returns Dest variant
+        let action = annot.action(&doc, Some(0)).unwrap().unwrap();
         match &action {
             LinkAction::Dest(PdfDestination::Page { page, kind: _ }) => {
                 let expected_page = (i % 3) as u32;
@@ -1295,7 +1322,7 @@ fn test_link_action_dest_explicit_roundtrip() {
 
         // Check into_pdf_action() wraps as GoTo
         let pdf_action = annot
-            .get_link_action(&doc, Some(0))
+            .action(&doc, Some(0))
             .unwrap()
             .unwrap()
             .into_pdf_action();
@@ -1312,8 +1339,6 @@ fn test_link_action_dest_explicit_roundtrip() {
 /// Round-trip test for `LinkAction::Dest` with named destinations.
 #[test]
 fn test_link_action_dest_named_roundtrip() {
-    use crate::pdf::PdfAnnotationType;
-
     let mut doc = PdfDocument::new();
     doc.new_page(PAGE_SIZE).unwrap();
 
@@ -1334,20 +1359,20 @@ fn test_link_action_dest_named_roundtrip() {
     }
 
     let page = doc.load_pdf_page(0).unwrap();
-    for (i, annot) in page.annotations().enumerate() {
-        assert_eq!(annot.r#type().unwrap(), PdfAnnotationType::Link);
+    let link_annots = page.link_annots().unwrap();
+    assert_eq!(link_annots.len(), links.len(), "link count mismatch");
 
-        let obj = annot.obj().unwrap();
+    for (i, annot) in link_annots.iter().enumerate() {
         assert!(
-            obj.get_dict("Dest").unwrap().is_some(),
+            annot.get_dict("Dest").unwrap().is_some(),
             "Link {i}: /Dest should be present"
         );
         assert!(
-            obj.get_dict("A").unwrap().is_none(),
+            annot.get_dict("A").unwrap().is_none(),
             "Link {i}: /A should be absent when /Dest is set"
         );
 
-        let action = annot.get_link_action(&doc, Some(0)).unwrap().unwrap();
+        let action = annot.action(&doc, Some(0)).unwrap().unwrap();
         match &action {
             LinkAction::Dest(PdfDestination::Named(name)) => {
                 let expected = match i {
@@ -1362,66 +1387,68 @@ fn test_link_action_dest_named_roundtrip() {
     }
 }
 
-/// Verify that `LinkAction::Action` writes `/A` and removes `/Dest`,
-/// and that switching from `/A` to `/Dest` removes `/A`.
+/// Verify that `set_action` on a [`PdfLinkAnnot`] correctly toggles between `/A` and `/Dest`.
+///
+/// - Switching to `Action` writes `/A` and removes `/Dest`.
+/// - Switching to `Dest` writes `/Dest` and removes `/A`.
 #[test]
 fn test_link_action_action_removes_dest() {
-    use crate::pdf::PdfAnnotationType;
-
     let mut doc = PdfDocument::new();
     doc.new_page(PAGE_SIZE).unwrap();
     doc.new_page(PAGE_SIZE).unwrap();
 
-    // Create a Link annotation — page must stay alive while we use the annotation
-    let mut page = doc.load_pdf_page(0).unwrap();
-    let mut annot = page.create_annotation(PdfAnnotationType::Link).unwrap();
-
-    // Set Dest on the annotation
-    annot
-        .set_link_action(
+    // Add a link with an initial Dest action
+    {
+        let mut page = doc.load_pdf_page(0).unwrap();
+        page.add_links(
             &mut doc,
-            &LinkAction::Dest(PdfDestination::Page {
-                page: 1,
-                kind: DestinationKind::Fit,
-            }),
+            &[PdfLink {
+                bounds: test_link_rect(0),
+                action: LinkAction::Dest(PdfDestination::Page {
+                    page: 1,
+                    kind: DestinationKind::Fit,
+                }),
+            }],
         )
         .unwrap();
-
-    {
-        let obj = annot.obj().unwrap();
-        assert!(
-            obj.get_dict("Dest").unwrap().is_some(),
-            "/Dest should be present after set_link_action(Dest)"
-        );
-        assert!(
-            obj.get_dict("A").unwrap().is_none(),
-            "/A should be absent when /Dest is set"
-        );
     }
 
-    // Now overwrite with an Action — should remove /Dest and set /A
+    // Obtain the link annotation dict and hold it for in-place mutation
+    let page = doc.load_pdf_page(0).unwrap();
+    let mut link_annots = page.link_annots().unwrap();
+    assert_eq!(link_annots.len(), 1);
+    let mut annot = link_annots.remove(0);
+
+    // Verify /Dest present, /A absent
+    assert!(
+        annot.get_dict("Dest").unwrap().is_some(),
+        "/Dest should be present after add_links(Dest)"
+    );
+    assert!(
+        annot.get_dict("A").unwrap().is_none(),
+        "/A should be absent when /Dest is set"
+    );
+
+    // Switch to Action — should remove /Dest and set /A
     annot
-        .set_link_action(
+        .set_action(
             &mut doc,
             &LinkAction::Action(PdfAction::Uri("https://example.com".into())),
         )
         .unwrap();
 
-    {
-        let obj = annot.obj().unwrap();
-        assert!(
-            obj.get_dict("A").unwrap().is_some(),
-            "/A should be present after set_link_action(Action)"
-        );
-        assert!(
-            obj.get_dict("Dest").unwrap().is_none(),
-            "/Dest should be removed after set_link_action(Action)"
-        );
-    }
+    assert!(
+        annot.get_dict("A").unwrap().is_some(),
+        "/A should be present after set_action(Action)"
+    );
+    assert!(
+        annot.get_dict("Dest").unwrap().is_none(),
+        "/Dest should be removed after set_action(Action)"
+    );
 
     // Switch back to Dest — should remove /A and set /Dest
     annot
-        .set_link_action(
+        .set_action(
             &mut doc,
             &LinkAction::Dest(PdfDestination::Page {
                 page: 1,
@@ -1430,15 +1457,12 @@ fn test_link_action_action_removes_dest() {
         )
         .unwrap();
 
-    {
-        let obj = annot.obj().unwrap();
-        assert!(
-            obj.get_dict("Dest").unwrap().is_some(),
-            "/Dest should be present after set_link_action(Dest)"
-        );
-        assert!(
-            obj.get_dict("A").unwrap().is_none(),
-            "/A should be removed after set_link_action(Dest)"
-        );
-    }
+    assert!(
+        annot.get_dict("Dest").unwrap().is_some(),
+        "/Dest should be present after set_action(Dest)"
+    );
+    assert!(
+        annot.get_dict("A").unwrap().is_none(),
+        "/A should be removed after set_action(Dest)"
+    );
 }

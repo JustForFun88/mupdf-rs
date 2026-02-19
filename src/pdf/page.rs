@@ -14,7 +14,7 @@ use crate::pdf::links::{
 };
 use crate::pdf::{
     LinkAction, PdfAction, PdfAnnotation, PdfAnnotationType, PdfDestination, PdfDocument,
-    PdfFilterOptions, PdfLink, PdfObject,
+    PdfFilterOptions, PdfLink, PdfLinkAnnot, PdfObject,
 };
 use crate::{context, unsafe_impl_ffi_wrapper, Error, FFIWrapper, Matrix, Page, Rect};
 
@@ -193,6 +193,75 @@ impl PdfPage {
             next: links_head,
             doc,
         })
+    }
+
+    /// Returns all link annotation dictionaries on this page as [`PdfLinkAnnot`] items.
+    ///
+    /// Iterates the page's `/Annots` array and returns entries whose `Subtype` is `Link`.
+    ///
+    /// # Why not `annotations()`?
+    ///
+    /// MuPDF's `pdf_sync_annots` (pdf-annot.c) skips `Subtype=Link` entries, so
+    /// [`PdfAnnotation`] of type [`PdfAnnotationType::Link`] can never be produced from a
+    /// page via the annotation iterator. This method bypasses that by reading the `/Annots`
+    /// array directly.
+    pub fn link_annots(&self) -> Result<Vec<PdfLinkAnnot>, Error> {
+        let page_obj = self.object();
+        let annots = match page_obj.get_dict("Annots")? {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+        let count = annots.len()?;
+        let mut result = Vec::new();
+        for i in 0..count {
+            let entry = match annots.get_array(i as i32)? {
+                Some(e) => e,
+                None => continue,
+            };
+            let resolved = match entry.resolve()? {
+                Some(r) => r,
+                None => continue,
+            };
+            let subtype = match resolved.get_dict("Subtype")? {
+                Some(s) => s,
+                None => continue,
+            };
+            if subtype.as_name()? == b"Link" {
+                result.push(PdfLinkAnnot::new(resolved));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Extracts all links from this page by reading the `/Annots` array directly.
+    ///
+    /// This is the symmetric counterpart to [`add_links`](Self::add_links): it reads the
+    /// same annotation dictionaries that `add_links` writes, preserving:
+    /// - The `/Dest` vs `/A` distinction ([`LinkAction::Dest`] vs [`LinkAction::Action`])
+    /// - Named destinations as [`PdfDestination::Named`] (not resolved to page numbers)
+    /// - The `Launch` vs `Uri` distinction
+    ///
+    /// Links with no recognizable action are silently skipped.
+    ///
+    /// `page_num` is the 0-based page number, used to resolve relative named actions
+    /// (`PrevPage`, `NextPage`). Pass `None` if unknown.
+    ///
+    /// For rendering use cases where named destinations should be fully resolved, prefer
+    /// [`pdf_links`](Self::pdf_links).
+    pub fn get_links_from_annots(
+        &self,
+        doc: &PdfDocument,
+        page_num: Option<i32>,
+    ) -> Result<Vec<PdfLink>, Error> {
+        let page_ctm = self.ctm()?;
+        let link_annots = self.link_annots()?;
+        let mut result = Vec::with_capacity(link_annots.len());
+        for annot in &link_annots {
+            if let Some(link) = annot.to_pdf_link(doc, page_num, Some(&page_ctm))? {
+                result.push(link);
+            }
+        }
+        Ok(result)
     }
 
     /// Adds link annotations to this page, using caller-provided inverse CTM functions

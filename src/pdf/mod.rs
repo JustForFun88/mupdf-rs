@@ -12,6 +12,8 @@ pub use document::{Encryption, PdfDocument, PdfWriteOptions, Permission};
 pub use filter::PdfFilterOptions;
 pub use graft_map::PdfGraftMap;
 pub use intent::Intent;
-pub use links::{DestPageResolver, FileSpec, LinkAction, PdfAction, PdfDestination, PdfLink};
+pub use links::{
+    DestPageResolver, FileSpec, LinkAction, PdfAction, PdfDestination, PdfLink, PdfLinkAnnot,
+};
 pub use object::PdfObject;
 pub use page::PdfPage;

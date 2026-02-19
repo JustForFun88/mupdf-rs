@@ -40,6 +40,9 @@ mod extraction;
 pub(crate) use extraction::parse_external_link;
 pub(crate) use extraction::parse_link_action_from_annot_dict;
 
+mod link_annot;
+pub use link_annot::PdfLinkAnnot;
+
 #[cfg(test)]
 mod tests_build;
 #[cfg(test)]
@@ -518,7 +521,7 @@ where
     }
 }
 
-/// Resolver for single operations. Uses a single Option slot to own the data.
+/// Resolver for single operations. Uses a single `Option` slot to own the data.
 pub(crate) struct SingleResolver<F> {
     pub slot: Option<(PdfObject, Option<Matrix>)>,
     pub fn_dest_inv_ctm: F,
@@ -544,7 +547,6 @@ where
     ) -> Result<(&PdfObject, &Option<Matrix>), Error> {
         let page_obj = doc.find_page(page_num as i32)?;
         let inv_ctm = (self.fn_dest_inv_ctm)(&page_obj)?;
-
         let (obj, mat) = self.slot.insert((page_obj, inv_ctm));
         Ok((obj, mat))
     }

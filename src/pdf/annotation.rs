@@ -5,11 +5,7 @@ use std::{
 
 use mupdf_sys::*;
 
-use crate::pdf::links::{
-    parse_link_action_from_annot_dict, set_link_action_on_annot_dict, DestPageResolver, LinkAction,
-    SingleResolver,
-};
-use crate::pdf::{PdfDocument, PdfObject};
+use crate::pdf::PdfObject;
 use crate::{color::AnnotationColor, pdf::Intent};
 use crate::{context, from_enum, Error};
 use crate::{pdf::PdfFilterOptions, Point, Rect};
@@ -294,82 +290,6 @@ impl PdfAnnotation {
         }
     }
 
-    /// Reads the link action from this annotation's dictionary, preserving
-    /// the `/Dest` vs `/A` distinction.
-    ///
-    /// Returns `Ok(None)` if this is not a Link annotation or has no recognizable action.
-    ///
-    /// `page_num` is the 0-based page number where this annotation lives, used to
-    /// resolve relative `Named` actions (`PrevPage`, `NextPage`). Pass `None` if
-    /// the page number is unknown. Absolute named actions (`FirstPage`, `LastPage`)
-    /// will still be resolved.
-    ///
-    /// Unlike [`PdfPage::pdf_links`](crate::pdf::PdfPage::pdf_links), this method:
-    /// - Does **not** resolve `named` destinations to page numbers
-    /// - Preserves the `Launch(FileSpec::Url)` vs `Uri` distinction
-    /// - Preserves whether the original entry was `/Dest` or `/A`
-    pub fn get_link_action(
-        &self,
-        doc: &PdfDocument,
-        page_num: Option<i32>,
-    ) -> Result<Option<LinkAction>, Error> {
-        if self.r#type()? != PdfAnnotationType::Link {
-            return Ok(None);
-        }
-        let obj = self.obj()?;
-        parse_link_action_from_annot_dict(&obj, doc, page_num)
-    }
-
-    /// Replaces the link action on this annotation.
-    ///
-    /// For [`LinkAction::Dest`], writes a `/Dest` entry directly and removes `/A`.
-    /// For [`LinkAction::Action`], writes an `/A` dictionary and removes `/Dest`.
-    ///
-    /// `GoTo` destination coordinates are transformed from Fitz space to PDF
-    /// user space using the destination page's CTM.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if this annotation is not of type Link.
-    pub fn set_link_action(
-        &mut self,
-        doc: &mut PdfDocument,
-        action: &LinkAction,
-    ) -> Result<(), Error> {
-        let mut resolver =
-            SingleResolver::new(|page_obj: &PdfObject| Ok(page_obj.page_ctm()?.invert()));
-        self.set_link_action_with_inv_ctm(doc, action, &mut resolver)
-    }
-
-    /// Like [`set_link_action`](Self::set_link_action) but with a caller-provided
-    /// [`DestPageResolver`] for `GoTo` destination coordinate transformation.
-    ///
-    /// This mirrors the `resolver` parameter in
-    /// [`PdfPage::add_links_with_inv_ctm`](crate::pdf::PdfPage::add_links_with_inv_ctm).
-    pub fn set_link_action_with_inv_ctm(
-        &mut self,
-        doc: &mut PdfDocument,
-        action: &LinkAction,
-        resolver: &mut impl DestPageResolver,
-    ) -> Result<(), Error> {
-        if self.r#type()? != PdfAnnotationType::Link {
-            return Err(Error::InvalidDestination(
-                "set_link_action called on non-Link annotation".into(),
-            ));
-        }
-
-        let mut obj = self.obj()?;
-        // Remove conflicting entry from existing annotation dict
-        match action {
-            LinkAction::Action(_) => {
-                let _ = obj.dict_delete("Dest");
-            }
-            LinkAction::Dest(_) => {
-                let _ = obj.dict_delete("A");
-            }
-        }
-        set_link_action_on_annot_dict(doc, &mut obj, action, resolver)
-    }
 }
 
 impl Drop for PdfAnnotation {
