@@ -178,8 +178,18 @@ pub(super) fn is_external_link(uri: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
 }
 
-/// Checks if the file path ends with .pdf (case-insensitive) and has at least one char name.
-/// Heuristic for reconstructing GoToR/Launch from flattened URIs.
+/// Heuristic for determining whether a URI path targets a PDF file.
+///
+/// Returns `true` if `file_name` ends with `.pdf` (case-insensitive) and is at
+/// least 4 characters long (i.e., the name portion before the extension is non-empty).
+///
+/// Used by [`parse_external_link`] to distinguish `GoToR` links (remote PDF targets)
+/// from `Launch` or `Uri` actions. MuPDF performs an equivalent check implicitly in
+/// [`pdf_new_action_from_link`] — only `file:` prefixed paths that point to a PDF are
+/// produced as `GoToR` — but this function extends the same heuristic to all paths,
+/// including external URLs such as `https://example.com/doc.pdf`.
+///
+/// [`pdf_new_action_from_link`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1177
 pub(super) fn is_pdf_path(file_name: &str) -> bool {
     file_name
         .get(file_name.len().saturating_sub(4)..)
@@ -284,11 +294,21 @@ fn parse_params(params: &str) -> ParsedFragment {
     }
 }
 
-/// Iterates over key=value pairs in a URI fragment.
+/// Iterates over `key=value` pairs in a URI fragment string.
 ///
-/// - Splits by & or #.
-/// - Trims whitespace.
-/// - Skips parts without an = sign.
+/// - Splits on `&` or `#` (the latter handles double-`#` present in some URIs).
+/// - Trims leading/trailing whitespace from each segment.
+/// - Skips segments that contain no `=` sign (e.g., raw named-destination fragments).
+///
+/// Used by [`parse_params`] to iterate destination parameters such as `page=`,
+/// `view=`, `zoom=`, and `viewrect=`.
+///
+/// MuPDF's [`pdf_new_explicit_dest_from_uri`] does equivalent parsing by probing the
+/// fragment string with `strstr(uri, "page=")`, `strstr(uri, "zoom=")`, etc. This
+/// iterator-based approach processes the same parameters in left-to-right order and
+/// additionally detects unknown keys (signalled via [`ParsedFragment::ContainsUnknownKeys`]).
+///
+/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L941
 fn fragment_kv_pairs(fragment: &str) -> impl Iterator<Item = (&str, &str)> {
     fragment
         .split(['&', '#'])
@@ -297,10 +317,14 @@ fn fragment_kv_pairs(fragment: &str) -> impl Iterator<Item = (&str, &str)> {
         .filter_map(|part| part.split_once('=').map(|(k, v)| (k.trim(), v.trim())))
 }
 
-/// Parses a 1-based page number string to a 0-based integer.
-/// Returns 0 if the result would be negative.
+/// Converts a 1-based page number string to a 0-based index, clamped to `0`.
 ///
-/// MuPDF: <https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L957>
+/// An input of `"1"` (or any value `≤ 1`) returns `0`; `"3"` returns `2`.
+/// Returns `None` if the string cannot be parsed as an integer.
+///
+/// Mirrors MuPDF's logic in [`pdf_new_explicit_dest_from_uri`] (pdf-link.c:957).
+///
+/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L957
 fn parse_page_1based_to_0based(s: &str) -> Option<u32> {
     let n: i32 = s.parse().ok()?;
     if n < 2 {
@@ -310,10 +334,23 @@ fn parse_page_1based_to_0based(s: &str) -> Option<u32> {
     }
 }
 
-/// Parses parameters for FitR (viewrect).
-/// Requires 4 comma-separated floats (left, top, width, height).
+/// Parses a `viewrect=` fragment parameter into a [`DestinationKind::FitR`].
 ///
-/// MuPDF: <https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L963>
+/// Expects exactly four comma-separated finite floats `x,y,w,h`:
+/// - `(x, y)` — top-left origin of the rectangle in page coordinates.
+/// - `w` — width; `h` — height (both must be non-zero).
+///
+/// The result is `FitR { left: x, bottom: y, right: x+w, top: y+h }`.
+///
+/// **Note:** The URI `viewrect` format uses origin-plus-dimensions `(x, y, w, h)`,
+/// while the PDF `/FitR` array stores corner coordinates `(left, bottom, right, top)`.
+/// This function converts between the two representations.
+///
+/// Returns `None` if fewer than four finite floats are present or if `w` or `h` is zero.
+///
+/// Mirrors MuPDF's parsing in [`pdf_new_explicit_dest_from_uri`] (pdf-link.c:963).
+///
+/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L963
 fn parse_viewrect(s: &str) -> Option<DestinationKind> {
     let mut floats = FloatParser::new(s);
     let x = floats.next()?;
@@ -333,11 +370,17 @@ fn parse_viewrect(s: &str) -> Option<DestinationKind> {
     })
 }
 
-/// Parses parameters for XYZ zoom.
-/// Format: zoom=scale,left,top.
-/// Scale <= 0 is normalized to 100%.
+/// Parses a `zoom=` fragment parameter into a [`DestinationKind::XYZ`].
 ///
-/// MuPDF: <https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L972>
+/// Format: `zoom=scale[,left[,top]]`. All three fields are optional beyond the first.
+///
+/// - `scale` — zoom percentage (e.g. `150` for 150 %). A value `≤ 0` or `+inf` is
+///   normalized to `100` (inherit zoom), matching MuPDF's behaviour.
+/// - `left`, `top` — XYZ origin coordinates; `None` if absent or non-finite.
+///
+/// Mirrors MuPDF's parsing in [`pdf_new_explicit_dest_from_uri`] (pdf-link.c:972).
+///
+/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L972
 fn parse_zoom(s: &str) -> DestinationKind {
     // zoom=scale[,left,top]
     let mut floats = FloatParser::new(s);
@@ -350,9 +393,27 @@ fn parse_zoom(s: &str) -> DestinationKind {
     }
 }
 
-/// Parses parameters for standard views (Fit, FitH, FitV, etc.).
+/// Parses a `view=` fragment parameter into a [`DestinationKind`] variant.
 ///
-/// MuPDF: <https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L983>
+/// Supported values (case-insensitive), their optional comma-separated parameter,
+/// and the resulting variant:
+///
+/// | Value           | Optional param | Variant                      |
+/// |-----------------|----------------|------------------------------|
+/// | `Fit`           | —              | [`DestinationKind::Fit`]     |
+/// | `FitB`          | —              | [`DestinationKind::FitB`]    |
+/// | `FitH[,top]`    | `top` (f32)    | [`DestinationKind::FitH`]    |
+/// | `FitBH[,top]`   | `top` (f32)    | [`DestinationKind::FitBH`]   |
+/// | `FitV[,left]`   | `left` (f32)   | [`DestinationKind::FitV`]    |
+/// | `FitBV[,left]`  | `left` (f32)   | [`DestinationKind::FitBV`]   |
+///
+/// The optional numeric parameter is the first comma-separated token after the view
+/// name. A missing, empty, or non-finite value maps to `None` (inherit current).
+/// Returns `None` for unrecognized or empty view strings.
+///
+/// Mirrors MuPDF's parsing in [`pdf_new_explicit_dest_from_uri`] (pdf-link.c:983).
+///
+/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L983
 fn parse_view(s: &str) -> Option<DestinationKind> {
     if s.is_empty() {
         return None;
@@ -385,7 +446,15 @@ fn parse_view(s: &str) -> Option<DestinationKind> {
     None
 }
 
-/// Helper struct to parse valid, finite f32 values from a comma-separated string.
+/// Helper for parsing finite `f32` values from a comma-separated string.
+///
+/// Wraps a [`str::Split`] iterator over `','` and yields only non-NaN, non-infinite
+/// values, advancing the iterator on each [`Self::next`] call.
+///
+/// Used by [`parse_viewrect`] and [`parse_zoom`] to replicate MuPDF's `next_float`
+/// helper (see [`pdf_new_explicit_dest_from_uri`], pdf-link.c:933).
+///
+/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L933
 struct FloatParser<'a>(std::str::Split<'a, char>);
 
 impl<'a> FloatParser<'a> {
@@ -393,8 +462,10 @@ impl<'a> FloatParser<'a> {
         Self(s.split(','))
     }
 
-    /// Returns the next float.
-    /// Returns None if the next segment is empty, malformed, non-finite, or if the string ends.
+    /// Returns the next finite `f32` from the comma-separated string.
+    ///
+    /// Returns `None` if the next segment is absent, empty, unparseable as `f32`,
+    /// or non-finite (`NaN` or infinite).
     fn next(&mut self) -> Option<f32> {
         self.0
             .next()
@@ -403,8 +474,17 @@ impl<'a> FloatParser<'a> {
     }
 }
 
-/// Helper to check and strip a prefix from a string in a case-insensitive manner.
-/// Returns Some(remainder) if the prefix matches, otherwise None.
+/// Strips a prefix from `s` in a case-insensitive (ASCII) manner.
+///
+/// Returns `Some(remainder)` if `s` starts with `pat` ignoring ASCII case,
+/// or `None` otherwise.
+///
+/// Used to detect the `"file:"` scheme in [`parse_external_link`], which corresponds
+/// to MuPDF's [`is_file_uri`] (pdf-link.c:861). MuPDF's check is case-sensitive, but
+/// RFC 3986 §3.1 defines URI schemes as case-insensitive, so this function also
+/// accepts `FILE:`, `File:`, etc.
+///
+/// [`is_file_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L861
 fn strip_prefix_icase<'a>(s: &'a str, pat: &str) -> Option<&'a str> {
     let len = pat.len();
     s.get(..len)
@@ -412,8 +492,15 @@ fn strip_prefix_icase<'a>(s: &'a str, pat: &str) -> Option<&'a str> {
         .and_then(|_| s.get(len..))
 }
 
-/// Decodes URL-encoded sequences and normalizes the path.
-/// See [`decode_uri_component`] and [`cleanname`] documentation.
+/// Percent-decodes a URI path component and normalizes path segments.
+///
+/// Applies [`decode_uri_component`] followed by [`cleanname`], equivalent to
+/// MuPDF's [`parse_file_uri_path`] (pdf-link.c:886).
+///
+/// Used when converting a `file:` or relative-path link to a filesystem path,
+/// resolving `%XX` escape sequences and collapsing `.` / `..` segments.
+///
+/// [`parse_file_uri_path`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L886
 fn decode_and_clean_path(path: &str) -> String {
     let decoded = decode_uri_component(path);
     cleanname(&decoded)
@@ -481,13 +568,18 @@ pub(super) fn decode_uri_component(s: &str) -> Cow<'_, str> {
 /// whether the original entry was `/Dest` or `/A`.
 ///
 /// Reading priority (matching [`pdf_load_link`] in MuPDF):
-/// 1. `/Dest` entry -> `LinkAction::Dest(destination)`
-/// 2. `/A` (Action) dictionary -> `LinkAction::Action(action)`
-/// 3. `/AA` (Additional Actions) -> `LinkAction::Action(action)`
+/// 1. `/Dest` entry → [`LinkAction::Dest`] (see [`parse_dest_value`]).
+/// 2. `/A` (Action) dictionary → [`LinkAction::Action`] (see [`parse_action_dict`]).
+/// 3. `/AA` (Additional Actions) → [`LinkAction::Action`]: tries `/D` (mouse-down)
+///    then `/U` (mouse-up).
 ///
-/// For `Page { .. }` destinations, the page number is resolved from the indirect
-/// page reference using [`PdfDocument::lookup_page_number`]. Coordinates
-/// are in Fitz coordinate space.
+/// **Note on `/AA` ordering:** MuPDF's [`pdf_load_link`] uses `pdf_dict_geta(AA, U, D)`,
+/// which prefers `/U` (mouse-up). This implementation checks `/D` first, then `/U`,
+/// following PDF 2.0 (ISO 32000-2:2020) which considers abbreviated action names.
+///
+/// For `Page { .. }` destinations from `/Dest` arrays, the page index is resolved from
+/// an indirect page object reference via [`PdfDocument::lookup_page_number`], and
+/// coordinates are transformed to Fitz coordinate space (see [`parse_dest_array`]).
 ///
 /// [`pdf_load_link`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L652
 pub(crate) fn parse_link_action_from_annot_dict(
@@ -520,8 +612,21 @@ pub(crate) fn parse_link_action_from_annot_dict(
     Ok(None)
 }
 
-/// Parses a `/Dest` value, which can be either a name/string (named dest)
-/// or an array (explicit dest).
+/// Parses a raw `/Dest` PDF object into a [`PdfDestination`].
+///
+/// Handles the three forms defined in PDF 32000-1:2008, §12.3.2:
+///
+/// | Object type          | Result                                                         |
+/// |----------------------|----------------------------------------------------------------|
+/// | Non-empty array      | Explicit destination — forwarded to [`parse_dest_array`]      |
+/// | Name (`/name`)       | `PdfDestination::Named(name)`                                 |
+/// | String (`(string)`)  | `PdfDestination::Named(string)`                               |
+///
+/// Returns `Ok(None)` for `null`, empty arrays, or unrecognized object types.
+///
+/// This is the Rust analogue of MuPDF's [`pdf_parse_link_dest`] (pdf-link.c:1126).
+///
+/// [`pdf_parse_link_dest`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1126
 fn parse_dest_value(dest: &PdfObject, doc: &PdfDocument) -> Result<Option<PdfDestination>, Error> {
     if dest.is_array()? && dest.len()? > 0 {
         parse_dest_array(dest, doc).map(Some)
@@ -536,7 +641,48 @@ fn parse_dest_value(dest: &PdfObject, doc: &PdfDocument) -> Result<Option<PdfDes
 }
 
 /// Parses a PDF destination array `[page_ref, /Kind, params...]` into a
-/// [`PdfDestination::Page`].
+/// [`PdfDestination::Page`], transforming coordinates from PDF default user space
+/// to Fitz (screen) coordinate space.
+///
+/// # Array format (PDF 32000-1:2008, §12.3.2.2)
+///
+/// ```text
+/// [page_ref, /XYZ,   left,   top,    zoom  ]
+/// [page_ref, /Fit                           ]
+/// [page_ref, /FitH,  top                   ]   — top may be null
+/// [page_ref, /FitV,  left                  ]   — left may be null
+/// [page_ref, /FitR,  left, bottom, right, top]
+/// [page_ref, /FitB                          ]
+/// [page_ref, /FitBH, top                   ]
+/// [page_ref, /FitBV, left                  ]
+/// ```
+///
+/// `page_ref` is either an indirect object reference to a page dict (local
+/// destinations) or a direct integer page number (remote `GoToR` destinations).
+///
+/// # Coordinate transformation
+///
+/// For local destinations (where `page_ref` is an indirect dict), coordinates in
+/// the array are in PDF default user space (Y axis pointing up). They are
+/// transformed to Fitz coordinate space (Y axis pointing down) using the page's
+/// CTM, matching MuPDF's [`populate_destination`] (pdf-link.c:82–154).
+/// For remote `GoToR` destinations no page dict is available, so no CTM
+/// transform is applied.
+///
+/// # Page clamping
+///
+/// The resolved page index is clamped to `[0, page_count - 1]`, matching
+/// MuPDF's `fz_clampi(pageno, 0, pdf_count_pages(ctx, doc) - 1)`.
+///
+/// # MuPDF source mapping
+///
+/// | Step                      | MuPDF location                              |
+/// |---------------------------|---------------------------------------------|
+/// | Page ref / CTM resolution | [`populate_destination`] (pdf-link.c:66)    |
+/// | Kind + param decoding     | [`DestinationKind::decode_from`]            |
+/// | Coordinate transform      | [`populate_destination`] (pdf-link.c:121)   |
+///
+/// [`populate_destination`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L66
 fn parse_dest_array(array: &PdfObject, doc: &PdfDocument) -> Result<PdfDestination, Error> {
     let page_obj = array
         .get_array(0)?
@@ -609,13 +755,39 @@ fn parse_dest_array(array: &PdfObject, doc: &PdfDocument) -> Result<PdfDestinati
     })
 }
 
-/// Dispatches on the `/S` (action type) entry of an action dictionary.
+/// Dispatches on the `/S` (action sub-type) entry of a PDF action dictionary and
+/// constructs the corresponding [`PdfAction`] (PDF 32000-1:2008, §12.6.4).
 ///
-/// `page_num` is the 0-based page number of the annotation's page, used to
-/// resolve relative `Named` actions (`PrevPage`, `NextPage`). When `None`,
-/// only absolute named actions (`FirstPage`, `LastPage`) can be resolved.
+/// `page_num` is the 0-based page index of the annotation's host page, used to
+/// resolve relative `Named` actions (`PrevPage`, `NextPage`). Pass `None` when
+/// the host page number is unavailable; in that case only `FirstPage` and
+/// `LastPage` can be resolved.
 ///
-/// MuPDF: [`pdf_parse_link_action`](https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L519)
+/// # Supported action types
+///
+/// | `/S` value | Key(s) read         | Result                                             |
+/// |------------|---------------------|----------------------------------------------------|
+/// | `GoTo`     | `/D` dest           | `PdfAction::GoTo(_)` via [`parse_dest_value`]      |
+/// | `URI`      | `/URI` string       | `PdfAction::Uri(_)`, base URI prepended if relative|
+/// | `GoToR`    | `/F` file, `/D` dest| `PdfAction::GoToR { .. }` via [`parse_filespec`]   |
+/// | `Launch`   | `/F` file           | `PdfAction::Launch(_)` via [`parse_filespec`]      |
+/// | `Named`    | `/N` name           | `PdfAction::GoTo(Page { .. })` for known names     |
+///
+/// **URI base resolution:** For non-external `URI` actions, the document's
+/// `Root/URI/Base` entry is prepended (falling back to `"file://"`), matching
+/// MuPDF's [`pdf_parse_link_action`] (pdf-link.c:536–543).
+///
+/// **GoToR destinations:** Remote dest arrays use integer page indices directly
+/// (no CTM transform), because the target page object is in a different document.
+///
+/// **Named actions:** Only `FirstPage`, `LastPage`, `PrevPage`, and `NextPage`
+/// are supported; all others return `Ok(None)`. The result is always a
+/// `GoTo(Page { .. })` with the resolved index and default destination kind,
+/// matching MuPDF's [`pdf_parse_link_action`] (pdf-link.c:558–580).
+///
+/// Returns `Ok(None)` if the `/S` entry is absent or the action type is unsupported.
+///
+/// [`pdf_parse_link_action`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L519
 fn parse_action_dict(
     action: &PdfObject,
     doc: &PdfDocument,
@@ -715,7 +887,23 @@ fn parse_action_dict(
     }
 }
 
-/// Parses a PDF file specification object into a [`FileSpec`].
+/// Parses a PDF file specification object (PDF 32000-1:2008, §7.11.3) into a [`FileSpec`].
+///
+/// | Object type                                      | Result                        |
+/// |--------------------------------------------------|-------------------------------|
+/// | String                                           | `FileSpec::Path(string)`      |
+/// | Dict with `FS = /URL` and `F` entry              | `FileSpec::Url(F value)`      |
+/// | Dict without `FS = /URL`, with a name entry      | `FileSpec::Path(name value)`  |
+///
+/// For dict file specs without the URL flag, the filename is taken from the first
+/// present key among `UF`, `F`, `Unix`, `DOS`, `Mac` (via [`get_file_name`]).
+///
+/// Returns [`Error::InvalidDestination`] if the object is neither a string nor a
+/// recognizable file specification dictionary.
+///
+/// This is the Rust analogue of MuPDF's [`convert_file_spec_to_URI`] (pdf-link.c:287).
+///
+/// [`convert_file_spec_to_URI`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L287
 fn parse_filespec(obj: &PdfObject) -> Result<FileSpec, Error> {
     if obj.is_string()? {
         return Ok(FileSpec::Path(obj.as_string()?.to_owned()));
@@ -743,13 +931,17 @@ fn parse_filespec(obj: &PdfObject) -> Result<FileSpec, Error> {
     ))
 }
 
-/// Rust port of MuPDF's `get_file_stream_and_name`.
+/// Returns the filename object from a PDF file specification dictionary.
 ///
-/// Returns `(file_stream_obj, name_obj)` where:
-/// - `name_obj` is the chosen filename string object (UF/F/Unix/DOS/Mac).
-/// - `file_stream_obj` is the corresponding EF entry (may be None even if name exists).
+/// Tries the following keys in priority order, returning the value of the first
+/// one present: `UF`, `F`, `Unix`, `DOS`, `Mac`.
 ///
-/// If no name is found, returns `(None, None)`.
+/// This mirrors the name-lookup portion of MuPDF's [`get_file_stream_and_name`]
+/// (pdf-link.c:225). Unlike MuPDF's `get_file_stream_and_name`, this function only
+/// returns the filename string object; the embedded file stream (`EF` dict entry)
+/// is not fetched.
+///
+/// [`get_file_stream_and_name`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L225
 fn get_file_name(fs: &PdfObject) -> Result<Option<PdfObject>, Error> {
     for key in ["UF", "F", "Unix", "DOS", "Mac"] {
         if let Some(v) = fs.get_dict(key)? {
