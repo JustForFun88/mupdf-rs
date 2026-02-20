@@ -32,7 +32,7 @@ use crate::{DestinationKind, Error, Rect};
 ///
 /// - `<N>` is a 1-based page number (converted to 0-based)
 /// - `<dest_params>` are `&view=` / `&zoom=` / `&viewrect=` parameters, parsed into a [`DestinationKind`]
-///   (see [`pdf_new_explicit_dest_from_uri`] and "Parameters for Opening PDF Files")
+///   (see [`pdf_new_explicit_dest_from_uri`] and ["Parameters for Opening PDF Files"])
 /// - `<params>` in the `GoToR` rows are parsed as:
 ///   - explicit destination parameters
 ///   - a named destination
@@ -179,21 +179,11 @@ pub(super) fn is_external_link(uri: &str) -> bool {
 }
 
 /// Heuristic for determining whether a URI path targets a PDF file.
-///
-/// Returns `true` if `file_name` ends with `.pdf` (case-insensitive) and is at
-/// least 4 characters long (i.e., the name portion before the extension is non-empty).
-///
-/// Used by [`parse_external_link`] to distinguish `GoToR` links (remote PDF targets)
-/// from `Launch` or `Uri` actions. MuPDF performs an equivalent check implicitly in
-/// [`pdf_new_action_from_link`] — only `file:` prefixed paths that point to a PDF are
-/// produced as `GoToR` — but this function extends the same heuristic to all paths,
-/// including external URLs such as `https://example.com/doc.pdf`.
-///
-/// [`pdf_new_action_from_link`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L1177
+/// Returns `true` if `file_name` ends with `.pdf` (case-insensitive).
 pub(super) fn is_pdf_path(file_name: &str) -> bool {
     file_name
         .get(file_name.len().saturating_sub(4)..)
-        .is_some_and(|extention| extention.eq_ignore_ascii_case(".pdf"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(".pdf"))
 }
 
 #[derive(Debug, PartialEq)]
@@ -296,19 +286,9 @@ fn parse_params(params: &str) -> ParsedFragment {
 
 /// Iterates over `key=value` pairs in a URI fragment string.
 ///
-/// - Splits on `&` or `#` (the latter handles double-`#` present in some URIs).
+/// - Splits on `&` or `#`.
 /// - Trims leading/trailing whitespace from each segment.
-/// - Skips segments that contain no `=` sign (e.g., raw named-destination fragments).
-///
-/// Used by [`parse_params`] to iterate destination parameters such as `page=`,
-/// `view=`, `zoom=`, and `viewrect=`.
-///
-/// MuPDF's [`pdf_new_explicit_dest_from_uri`] does equivalent parsing by probing the
-/// fragment string with `strstr(uri, "page=")`, `strstr(uri, "zoom=")`, etc. This
-/// iterator-based approach processes the same parameters in left-to-right order and
-/// additionally detects unknown keys (signalled via [`ParsedFragment::ContainsUnknownKeys`]).
-///
-/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L941
+/// - Skips segments that contain no `=` sign.
 fn fragment_kv_pairs(fragment: &str) -> impl Iterator<Item = (&str, &str)> {
     fragment
         .split(['&', '#'])
@@ -317,14 +297,10 @@ fn fragment_kv_pairs(fragment: &str) -> impl Iterator<Item = (&str, &str)> {
         .filter_map(|part| part.split_once('=').map(|(k, v)| (k.trim(), v.trim())))
 }
 
-/// Converts a 1-based page number string to a 0-based index, clamped to `0`.
+/// Parses a 1-based page number string to a 0-based integer. Returns 0 if the result
+/// would be negative. Mirrors MuPDF's logic in [`pdf_new_explicit_dest_from_uri:957`].
 ///
-/// An input of `"1"` (or any value `≤ 1`) returns `0`; `"3"` returns `2`.
-/// Returns `None` if the string cannot be parsed as an integer.
-///
-/// Mirrors MuPDF's logic in [`pdf_new_explicit_dest_from_uri`] (pdf-link.c:957).
-///
-/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L957
+/// [`pdf_new_explicit_dest_from_uri:957`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L957
 fn parse_page_1based_to_0based(s: &str) -> Option<u32> {
     let n: i32 = s.parse().ok()?;
     if n < 2 {
@@ -342,15 +318,9 @@ fn parse_page_1based_to_0based(s: &str) -> Option<u32> {
 ///
 /// The result is `FitR { left: x, bottom: y, right: x+w, top: y+h }`.
 ///
-/// **Note:** The URI `viewrect` format uses origin-plus-dimensions `(x, y, w, h)`,
-/// while the PDF `/FitR` array stores corner coordinates `(left, bottom, right, top)`.
-/// This function converts between the two representations.
+/// Mirrors MuPDF's parsing in [`pdf_new_explicit_dest_from_uri:963`].
 ///
-/// Returns `None` if fewer than four finite floats are present or if `w` or `h` is zero.
-///
-/// Mirrors MuPDF's parsing in [`pdf_new_explicit_dest_from_uri`] (pdf-link.c:963).
-///
-/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L963
+/// [`pdf_new_explicit_dest_from_uri:963`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L963
 fn parse_viewrect(s: &str) -> Option<DestinationKind> {
     let mut floats = FloatParser::new(s);
     let x = floats.next()?;
@@ -374,13 +344,14 @@ fn parse_viewrect(s: &str) -> Option<DestinationKind> {
 ///
 /// Format: `zoom=scale[,left[,top]]`. All three fields are optional beyond the first.
 ///
-/// - `scale` — zoom percentage (e.g. `150` for 150 %). A value `≤ 0` or `+inf` is
+/// - `scale` — zoom percentage (e.g. `150` for 150 %). A value `≤ 0` is
 ///   normalized to `100` (inherit zoom), matching MuPDF's behaviour.
+/// - An insinite value converted to `None` which is dirrerent from MuPDF behaviour, which normalizes to `100` (inherit zoom), matching MuPDF's behaviour.
 /// - `left`, `top` — XYZ origin coordinates; `None` if absent or non-finite.
 ///
-/// Mirrors MuPDF's parsing in [`pdf_new_explicit_dest_from_uri`] (pdf-link.c:972).
+/// Mirrors MuPDF's parsing in [`pdf_new_explicit_dest_from_uri:972`].
 ///
-/// [`pdf_new_explicit_dest_from_uri`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L972
+/// [`pdf_new_explicit_dest_from_uri:972`]: https://github.com/ArtifexSoftware/mupdf/blob/60bf95d09f496ab67a5e4ea872bdd37a74b745fe/source/pdf/pdf-link.c#L972
 fn parse_zoom(s: &str) -> DestinationKind {
     // zoom=scale[,left,top]
     let mut floats = FloatParser::new(s);

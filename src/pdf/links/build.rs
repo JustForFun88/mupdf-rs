@@ -30,7 +30,7 @@ use crate::{Error, Matrix};
 /// where:
 /// - `BS` is the Border Style dictionary ([PDF 32000-1:2008, 12.5.4], Table 166).
 /// - `S = /S` selects the solid border style, `Type = /Border` types the sub-dictionary,
-/// - and `W = 0` sets zero width — producing an invisible border while the link region
+///   and `W = 0` sets zero width — producing an invisible border while the link region
 ///   remains active.
 /// - `P` is the parent page back-reference ([PDF 32000-1:2008, 12.5.2], Table 164).
 ///
@@ -129,9 +129,8 @@ pub(crate) fn set_link_action_on_annot_dict(
 /// | `Launch(..)`              | `Launch`   | -                           | filespec dict |
 ///
 /// For `GoTo(Page { .. })`, destination coordinates are transformed from MuPDF page space to
-/// PDF default user space using the inverse CTM from the `resolver`. For `GoToR` and
-/// `Launch`, coordinates are passed as-is (already in PDF default user space), and file
-/// specifications are encoded by [`super::FileSpec::encode_into`].
+/// PDF default user space using the inverse CTM from the `resolver`. For `GoToR` coordinates
+/// are passed as-is (already in PDF default user space).
 ///
 /// **Note:** Callers are responsible for removing any conflicting `/Dest` entry before calling
 /// this function when updating existing annotations.
