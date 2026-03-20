@@ -441,6 +441,17 @@ impl PdfDocument {
         unsafe { ffi_try!(mupdf_pdf_calculate_form(context(), self.inner)) }
     }
 
+    pub fn bake_document(&mut self, bake_annots: bool, bake_widgets: bool) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(mupdf_pdf_bake_document(
+                context(),
+                self.inner,
+                bake_annots,
+                bake_widgets
+            ))
+        }
+    }
+
     pub fn trailer(&self) -> Result<PdfObject, Error> {
         unsafe { ffi_try!(mupdf_pdf_trailer(context(), self.inner)) }
             .map(|inner| unsafe { PdfObject::from_raw(inner) })
@@ -798,6 +809,12 @@ mod test {
     }
 
     #[test]
+    fn test_pdf_document_bake_document() {
+        let mut doc = test_document!("../..", "files/dummy.pdf" as PdfDocument).unwrap();
+        doc.bake_document(false, false).unwrap();
+    }
+
+    #[test]
     fn test_pdf_document_new_objs() {
         let pdf = PdfDocument::new();
 
@@ -908,4 +925,95 @@ mod test {
         let doc = test_document!("../..", "files/dummy.pdf" as PdfDocument).unwrap();
         let _page = doc.find_page(0).unwrap();
     }
+
+    #[test]
+    fn test_pdf_dict_put_name() {
+        let pdf = PdfDocument::new();
+        let mut obj = pdf.new_dict().unwrap();
+        obj.dict_put_name("Type", "Page").unwrap();
+        let val = obj.get_dict("Type").unwrap().unwrap();
+        assert_eq!(val.as_name().unwrap(), b"Page");
+        assert_eq!(val.as_name_str().unwrap(), "Page");
+    }
+
+    #[test]
+    fn test_pdf_dict_put_int() {
+        let pdf = PdfDocument::new();
+        let mut obj = pdf.new_dict().unwrap();
+        obj.dict_put_int("Rotate", 90).unwrap();
+        let val = obj.get_dict("Rotate").unwrap().unwrap();
+        assert_eq!(val.as_int().unwrap(), 90);
+    }
+
+    #[test]
+    fn test_pdf_dict_put_text_string() {
+        let pdf = PdfDocument::new();
+        let mut obj = pdf.new_dict().unwrap();
+        obj.dict_put_text_string("Title", "Hello World").unwrap();
+        let val = obj.get_dict_text_string("Title").unwrap();
+        assert_eq!(val.as_deref(), Some("Hello World"));
+    }
+
+    #[test]
+    fn test_pdf_dict_put_bool() {
+        let pdf = PdfDocument::new();
+        let mut obj = pdf.new_dict().unwrap();
+        obj.dict_put_bool("NeedAppearances", true).unwrap();
+        let val = obj.get_dict("NeedAppearances").unwrap().unwrap();
+        assert!(val.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_pdf_dict_put_real() {
+        let pdf = PdfDocument::new();
+        let mut obj = pdf.new_dict().unwrap();
+        obj.dict_put_real("Width", 3.14).unwrap();
+        let val = obj.get_dict("Width").unwrap().unwrap();
+        let f = val.as_float().unwrap();
+        assert!((f - 3.14).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_pdf_dict_put_array() {
+        let pdf = PdfDocument::new();
+        let mut obj = pdf.new_dict().unwrap();
+        let mut arr = obj.dict_put_array("Kids", 4).unwrap();
+        arr.array_push(pdf.new_int(1).unwrap()).unwrap();
+        arr.array_push(pdf.new_int(2).unwrap()).unwrap();
+        // Verify the array is accessible through the dict
+        let stored = obj.get_dict("Kids").unwrap().unwrap();
+        assert_eq!(stored.len().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_pdf_dict_put_dict() {
+        let pdf = PdfDocument::new();
+        let mut obj = pdf.new_dict().unwrap();
+        let mut inner = obj.dict_put_dict("Resources", 2).unwrap();
+        inner.dict_put_name("Type", "Font").unwrap();
+        // Verify the dict is accessible through the parent dict
+        let stored = obj.get_dict("Resources").unwrap().unwrap();
+        let val = stored.get_dict("Type").unwrap().unwrap();
+        assert_eq!(val.as_name_str().unwrap(), "Font");
+    }
+
+    #[test]
+    fn test_pdf_get_dict_text_string_missing_key() {
+        let pdf = PdfDocument::new();
+        let obj = pdf.new_dict().unwrap();
+        let val = obj.get_dict_text_string("NonExistent").unwrap();
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn test_pdf_name_eq() {
+        use crate::pdf::PdfObject;
+        let name = PdfObject::new_name("Widget").unwrap();
+        assert!(name.name_eq("Widget").unwrap());
+        assert!(!name.name_eq("Link").unwrap());
+        // Non-name object should return false
+        let int_obj = PdfObject::new_int(42).unwrap();
+        assert!(!int_obj.name_eq("Widget").unwrap());
+    }
+
 }

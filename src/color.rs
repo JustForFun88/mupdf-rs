@@ -1,4 +1,4 @@
-#[derive(Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Color {
     pub alpha: u8,
     pub red: u8,
@@ -53,6 +53,7 @@ impl Color {
 /// indicates white.
 ///
 /// [`PdfAnnotation::set_color`]: crate::pdf::annotation::PdfAnnotation::set_color
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AnnotationColor {
     Gray(f32),
     Rgb {

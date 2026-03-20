@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use mupdf_sys::*;
 
-use crate::pdf::PdfDocument;
+use crate::pdf::{PdfAnnotationType, PdfDocument};
 use crate::{context, Buffer, Error, Matrix};
 
 pub trait IntoPdfDictKey {
@@ -347,6 +347,156 @@ impl PdfObject {
     pub fn dict_delete<K: IntoPdfDictKey>(&mut self, key: K) -> Result<(), Error> {
         let key_obj = key.into_pdf_dict_key()?;
         unsafe { ffi_try!(mupdf_pdf_dict_delete(context(), self.inner, key_obj.inner)) }
+    }
+
+    pub fn dict_put_name<K: IntoPdfDictKey>(&mut self, key: K, name: &str) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        let c_name = CString::new(name)?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_name(
+                context(),
+                self.inner,
+                key_obj.inner,
+                c_name.as_ptr()
+            ))
+        }
+    }
+
+    pub fn dict_put_int<K: IntoPdfDictKey>(&mut self, key: K, value: i32) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_int(
+                context(),
+                self.inner,
+                key_obj.inner,
+                value as i64
+            ))
+        }
+    }
+
+    pub fn dict_put_text_string<K: IntoPdfDictKey>(
+        &mut self,
+        key: K,
+        text: &str,
+    ) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        let c_text = CString::new(text)?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_text_string(
+                context(),
+                self.inner,
+                key_obj.inner,
+                c_text.as_ptr()
+            ))
+        }
+    }
+
+    pub fn dict_put_bool<K: IntoPdfDictKey>(&mut self, key: K, value: bool) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_bool(
+                context(),
+                self.inner,
+                key_obj.inner,
+                value as i32
+            ))
+        }
+    }
+
+    pub fn dict_put_real<K: IntoPdfDictKey>(&mut self, key: K, value: f32) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_real(
+                context(),
+                self.inner,
+                key_obj.inner,
+                value
+            ))
+        }
+    }
+
+    pub fn dict_put_array<K: IntoPdfDictKey>(
+        &mut self,
+        key: K,
+        capacity: i32,
+    ) -> Result<PdfObject, Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        let inner = unsafe {
+            ffi_try!(mupdf_pdf_dict_put_array(
+                context(),
+                self.inner,
+                key_obj.inner,
+                capacity
+            ))
+        }?;
+        Ok(Self { inner })
+    }
+
+    pub fn dict_put_dict<K: IntoPdfDictKey>(
+        &mut self,
+        key: K,
+        capacity: i32,
+    ) -> Result<PdfObject, Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        let inner = unsafe {
+            ffi_try!(mupdf_pdf_dict_put_dict(
+                context(),
+                self.inner,
+                key_obj.inner,
+                capacity
+            ))
+        }?;
+        Ok(Self { inner })
+    }
+
+    /// Get a text string value from a dict entry by key.
+    ///
+    /// Returns `Ok(None)` if the key is not present.
+    pub fn get_dict_text_string<K: IntoPdfDictKey>(&self, key: K) -> Result<Option<String>, Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        let ptr = unsafe {
+            ffi_try!(mupdf_pdf_dict_get_text_string(
+                context(),
+                self.inner,
+                key_obj.inner
+            ))
+        }?;
+        if ptr.is_null() {
+            return Ok(None);
+        }
+        let c_str = unsafe { CStr::from_ptr(ptr) };
+        let s = c_str.to_str().map_err(|_| Error::InvalidUtf8)?;
+        if s.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(s.to_owned()))
+    }
+
+    /// Compare this name object to a string.
+    /// Returns `false` if this object is not a name.
+    pub fn name_eq(&self, name: &str) -> Result<bool, Error> {
+        match self.as_name() {
+            Ok(bytes) => Ok(bytes == name.as_bytes()),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Get the name of this object as a `&str`.
+    /// Returns an error if the name bytes are not valid UTF-8.
+    pub fn as_name_str(&self) -> Result<&str, Error> {
+        let bytes = self.as_name()?;
+        std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)
+    }
+
+    /// Get the annotation type from this object's `/Subtype` entry.
+    /// Returns `PdfAnnotationType::Unknown` if the subtype is not recognized.
+    pub fn annot_type(&self) -> Result<PdfAnnotationType, Error> {
+        let raw =
+            unsafe { ffi_try!(mupdf_pdf_obj_annot_type(context(), self.inner)) }?;
+        Ok(
+            PdfAnnotationType::try_from(raw as pdf_annot_type)
+                .unwrap_or(PdfAnnotationType::Unknown),
+        )
     }
 
     fn print(&self, tight: bool, ascii: bool) -> Result<String, Error> {

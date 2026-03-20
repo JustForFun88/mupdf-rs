@@ -69,14 +69,19 @@ impl PdfPage {
             ffi_try!(mupdf_pdf_delete_annot(
                 context(),
                 self.as_mut_ptr(),
-                annot.inner
+                annot.inner.as_ptr()
             ))
         }
     }
 
     pub fn annotations(&self) -> AnnotationIter {
-        let next = unsafe { pdf_first_annot(context(), self.as_ptr().cast_mut()) };
-        AnnotationIter { next }
+        let page = self.as_ptr().cast_mut() as *mut pdf_page;
+        let next = unsafe { pdf_first_annot(context(), page) };
+        unsafe { pdf_keep_page(context(), page) };
+        AnnotationIter {
+            next: NonNull::new(next),
+            page: unsafe { NonNull::new_unchecked(page) },
+        }
     }
 
     pub fn update(&mut self) -> Result<bool, Error> {
@@ -505,21 +510,25 @@ impl DerefMut for PdfPage {
 
 #[derive(Debug)]
 pub struct AnnotationIter {
-    next: *mut pdf_annot,
+    next: Option<NonNull<pdf_annot>>,
+    page: NonNull<pdf_page>,
 }
 
 impl Iterator for AnnotationIter {
     type Item = PdfAnnotation;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.next.is_null() {
-            return None;
-        }
-        let node = self.next;
+        let node = self.next?.as_ptr();
         unsafe {
-            self.next = pdf_next_annot(context(), node);
-            Some(PdfAnnotation::from_raw(node))
+            self.next = NonNull::new(pdf_next_annot(context(), node));
+            Some(PdfAnnotation::from_raw_keep_ref(node))
         }
+    }
+}
+
+impl Drop for AnnotationIter {
+    fn drop(&mut self) {
+        unsafe { pdf_drop_page(context(), self.page.as_ptr()) };
     }
 }
 

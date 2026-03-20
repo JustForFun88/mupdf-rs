@@ -441,6 +441,66 @@ void mupdf_pdf_dict_delete(fz_context *ctx, pdf_obj *self, pdf_obj *key, mupdf_e
     TRY_CATCH_VOID(pdf_dict_del(ctx, self, key));
 }
 
+void mupdf_pdf_dict_put_name(fz_context *ctx, pdf_obj *dict, pdf_obj *key, const char *x, mupdf_error_t **errptr)
+{
+    TRY_CATCH_VOID(pdf_dict_put_name(ctx, dict, key, x));
+}
+
+void mupdf_pdf_dict_put_int(fz_context *ctx, pdf_obj *dict, pdf_obj *key, int64_t x, mupdf_error_t **errptr)
+{
+    TRY_CATCH_VOID(pdf_dict_put_int(ctx, dict, key, x));
+}
+
+void mupdf_pdf_dict_put_text_string(fz_context *ctx, pdf_obj *dict, pdf_obj *key, const char *x, mupdf_error_t **errptr)
+{
+    TRY_CATCH_VOID(pdf_dict_put_text_string(ctx, dict, key, x));
+}
+
+void mupdf_pdf_dict_put_bool(fz_context *ctx, pdf_obj *dict, pdf_obj *key, int x, mupdf_error_t **errptr)
+{
+    TRY_CATCH_VOID(pdf_dict_put_bool(ctx, dict, key, x));
+}
+
+void mupdf_pdf_dict_put_real(fz_context *ctx, pdf_obj *dict, pdf_obj *key, float x, mupdf_error_t **errptr)
+{
+    TRY_CATCH_VOID(pdf_dict_put_real(ctx, dict, key, (double)x));
+}
+
+pdf_obj *mupdf_pdf_dict_put_array(fz_context *ctx, pdf_obj *dict, pdf_obj *key, int initial, mupdf_error_t **errptr)
+{
+    pdf_obj *result = NULL;
+    fz_try(ctx)
+    {
+        result = pdf_dict_put_array(ctx, dict, key, initial);
+        pdf_keep_obj(ctx, result);
+    }
+    fz_catch(ctx)
+    {
+        mupdf_save_error(ctx, errptr);
+    }
+    return result;
+}
+
+pdf_obj *mupdf_pdf_dict_put_dict(fz_context *ctx, pdf_obj *dict, pdf_obj *key, int initial, mupdf_error_t **errptr)
+{
+    pdf_obj *result = NULL;
+    fz_try(ctx)
+    {
+        result = pdf_dict_put_dict(ctx, dict, key, initial);
+        pdf_keep_obj(ctx, result);
+    }
+    fz_catch(ctx)
+    {
+        mupdf_save_error(ctx, errptr);
+    }
+    return result;
+}
+
+const char *mupdf_pdf_dict_get_text_string(fz_context *ctx, pdf_obj *dict, pdf_obj *key, mupdf_error_t **errptr)
+{
+    TRY_CATCH(const char *, NULL, pdf_dict_get_text_string(ctx, dict, key));
+}
+
 char *mupdf_pdf_obj_to_string(fz_context *ctx, pdf_obj *obj, bool tight, bool ascii, mupdf_error_t **errptr)
 {
     char *s = NULL;
