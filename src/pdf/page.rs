@@ -76,7 +76,11 @@ impl PdfPage {
 
     pub fn annotations(&self) -> AnnotationIter {
         let next = unsafe { pdf_first_annot(context(), self.as_ptr().cast_mut()) };
-        AnnotationIter { next }
+        AnnotationIter {
+            next,
+            // Keep the underlying page alive while iterating raw `pdf_annot` list nodes.
+            _page: self.deref().clone(),
+        }
     }
 
     pub fn update(&mut self) -> Result<bool, Error> {
@@ -506,6 +510,7 @@ impl DerefMut for PdfPage {
 #[derive(Debug)]
 pub struct AnnotationIter {
     next: *mut pdf_annot,
+    _page: Page,
 }
 
 impl Iterator for AnnotationIter {
@@ -518,7 +523,7 @@ impl Iterator for AnnotationIter {
         let node = self.next;
         unsafe {
             self.next = pdf_next_annot(context(), node);
-            Some(PdfAnnotation::from_raw(node))
+            Some(PdfAnnotation::from_raw(pdf_keep_annot(context(), node)))
         }
     }
 }
@@ -541,8 +546,8 @@ impl TryFrom<Page> for PdfPage {
 #[cfg(test)]
 mod test {
     use crate::document::test_document;
-    use crate::pdf::{PdfAnnotation, PdfDocument, PdfPage};
-    use crate::{Matrix, Rect};
+    use crate::pdf::{PdfAnnotationType, PdfDocument, PdfPage};
+    use crate::{Matrix, Rect, Size};
 
     #[test]
     fn test_page_properties() {
@@ -578,9 +583,18 @@ mod test {
 
     #[test]
     fn test_page_annotations() {
-        let doc = test_document!("../..", "files/dummy.pdf" as PdfDocument).unwrap();
-        let page0 = PdfPage::try_from(doc.load_page(0).unwrap()).unwrap();
-        let annots: Vec<PdfAnnotation> = page0.annotations().collect();
-        assert_eq!(annots.len(), 0);
+        let mut iter = {
+            let mut doc = PdfDocument::new();
+            let mut page = doc.new_page(Size::A4).unwrap();
+            page.create_annotation(PdfAnnotationType::Text).unwrap();
+            page.annotations()
+        };
+
+        let annot = iter.next().expect("missing annotation");
+        assert_eq!(annot.r#type().unwrap(), PdfAnnotationType::Text);
+        assert!(iter.next().is_none());
+
+        drop(iter);
+        drop(annot);
     }
 }
