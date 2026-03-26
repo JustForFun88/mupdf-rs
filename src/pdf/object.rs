@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::convert::TryFrom;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -7,6 +8,7 @@ use std::str::FromStr;
 
 use mupdf_sys::*;
 
+use super::primitives::{PdfString, PdfVec};
 use crate::pdf::PdfDocument;
 use crate::{context, Buffer, Error, Matrix};
 
@@ -26,9 +28,81 @@ impl IntoPdfDictKey for String {
     }
 }
 
+impl IntoPdfDictKey for &CStr {
+    fn into_pdf_dict_key(self) -> Result<PdfObject, Error> {
+        PdfObject::new_name(self)
+    }
+}
+
+impl IntoPdfDictKey for CString {
+    fn into_pdf_dict_key(self) -> Result<PdfObject, Error> {
+        PdfObject::new_name(&self)
+    }
+}
+
 impl IntoPdfDictKey for PdfObject {
     fn into_pdf_dict_key(self) -> Result<PdfObject, Error> {
         Ok(self)
+    }
+}
+
+impl IntoPdfDictKey for PdfString {
+    #[inline]
+    fn into_pdf_dict_key(self) -> Result<PdfObject, Error> {
+        PdfObject::new_name(self)
+    }
+}
+
+impl IntoPdfDictKey for &PdfString {
+    #[inline]
+    fn into_pdf_dict_key(self) -> Result<PdfObject, Error> {
+        PdfObject::new_name(self)
+    }
+}
+
+pub trait TryAsCStr {
+    fn try_as_c_str(&self) -> Result<Cow<'_, CStr>, Error>;
+}
+
+impl TryAsCStr for str {
+    #[inline]
+    fn try_as_c_str(&self) -> Result<Cow<'_, CStr>, Error> {
+        Ok(Cow::Owned(CString::new(self)?))
+    }
+}
+
+impl TryAsCStr for String {
+    #[inline]
+    fn try_as_c_str(&self) -> Result<Cow<'_, CStr>, Error> {
+        Ok(Cow::Owned(CString::new(self.as_str())?))
+    }
+}
+
+impl TryAsCStr for CStr {
+    #[inline]
+    fn try_as_c_str(&self) -> Result<Cow<'_, CStr>, Error> {
+        Ok(Cow::Borrowed(self))
+    }
+}
+
+impl TryAsCStr for CString {
+    #[inline]
+    fn try_as_c_str(&self) -> Result<Cow<'_, CStr>, Error> {
+        Ok(Cow::Borrowed(self))
+    }
+}
+
+impl TryAsCStr for PdfString {
+    #[inline]
+    fn try_as_c_str(&self) -> Result<Cow<'_, CStr>, Error> {
+        Ok(Cow::Borrowed(self.as_cstr()))
+    }
+}
+
+impl<T: TryAsCStr + ?Sized> TryAsCStr for &T {
+    #[inline]
+    fn try_as_c_str(&self) -> Result<Cow<'_, CStr>, Error> {
+        (**self).try_as_c_str()
     }
 }
 
@@ -75,14 +149,14 @@ impl PdfObject {
             .map(|inner| unsafe { PdfObject::from_raw(inner) })
     }
 
-    pub fn new_string(s: &str) -> Result<PdfObject, Error> {
-        let c_str = CString::new(s)?;
+    pub fn new_string(s: impl TryAsCStr) -> Result<PdfObject, Error> {
+        let c_str = s.try_as_c_str()?;
         unsafe { ffi_try!(mupdf_pdf_new_string(context(), c_str.as_ptr())) }
             .map(|inner| unsafe { PdfObject::from_raw(inner) })
     }
 
-    pub fn new_name(name: &str) -> Result<PdfObject, Error> {
-        let c_name = CString::new(name)?;
+    pub fn new_name(name: impl TryAsCStr) -> Result<PdfObject, Error> {
+        let c_name = name.try_as_c_str()?;
         unsafe { ffi_try!(mupdf_pdf_new_name(context(), c_name.as_ptr())) }
             .map(|inner| unsafe { PdfObject::from_raw(inner) })
     }
@@ -147,22 +221,26 @@ impl PdfObject {
         unsafe { ffi_try!(mupdf_pdf_to_indirect(context(), self.inner)) }
     }
 
-    pub fn as_name(&self) -> Result<&[u8], Error> {
+    pub fn as_name(&self) -> Result<PdfVec, Error> {
         let name_ptr = unsafe { ffi_try!(mupdf_pdf_to_name(context(), self.inner)) }?;
-        let c_name = unsafe { CStr::from_ptr(name_ptr) };
-        Ok(c_name.to_bytes())
+        Ok(PdfVec::from(unsafe { CStr::from_ptr(name_ptr) }))
     }
 
-    pub fn as_string(&self) -> Result<&str, Error> {
+    /// Compare this name object to a string.
+    /// Returns `false` if this object is not a name or does not match.
+    pub fn name_eq(&self, name: impl AsRef<[u8]>) -> bool {
+        self.as_name().is_ok_and(|bytes| bytes == name.as_ref())
+    }
+
+    pub fn as_string(&self) -> Result<PdfString, Error> {
         let str_ptr = unsafe { ffi_try!(mupdf_pdf_to_string(context(), self.inner)) }?;
-        let c_str = unsafe { CStr::from_ptr(str_ptr) };
-        Ok(c_str.to_str().unwrap())
+        PdfString::try_from(unsafe { CStr::from_ptr(str_ptr) })
     }
 
-    pub fn as_bytes(&self) -> Result<&[u8], Error> {
+    pub fn as_bytes(&self) -> Result<PdfVec, Error> {
         let mut len = 0;
         let ptr = unsafe { ffi_try!(mupdf_pdf_to_bytes(context(), self.inner, &mut len)) }?;
-        Ok(unsafe { slice::from_raw_parts(ptr, len) })
+        Ok(PdfVec::from(unsafe { slice::from_raw_parts(ptr, len) }))
     }
 
     pub fn resolve(&self) -> Result<Option<Self>, Error> {

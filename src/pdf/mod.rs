@@ -6,6 +6,7 @@ pub mod intent;
 pub mod links;
 pub mod object;
 pub mod page;
+pub mod primitives;
 
 pub use annotation::{LineEndingStyle, PdfAnnotation, PdfAnnotationType};
 pub use document::{Encryption, PdfDocument, PdfWriteOptions, Permission};
@@ -15,8 +16,9 @@ pub use intent::Intent;
 pub use links::{
     DestPageResolver, FileSpec, LinkAction, PdfAction, PdfDestination, PdfLink, PdfLinkAnnot,
 };
-pub use object::PdfObject;
+pub use object::{IntoPdfDictKey, PdfObject, TryAsCStr};
 pub use page::PdfPage;
+pub use primitives::{PdfString, PdfVec};
 
 #[must_use]
 pub struct DocOperation<'a> {
