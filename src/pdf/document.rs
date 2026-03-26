@@ -442,6 +442,17 @@ impl PdfDocument {
         unsafe { ffi_try!(mupdf_pdf_calculate_form(context(), self.inner)) }
     }
 
+    pub fn bake_document(&mut self, bake_annots: bool, bake_widgets: bool) -> Result<(), Error> {
+        unsafe {
+            ffi_try!(mupdf_pdf_bake_document(
+                context(),
+                self.inner,
+                bake_annots,
+                bake_widgets
+            ))
+        }
+    }
+
     pub fn trailer(&self) -> Result<PdfObject, Error> {
         unsafe { ffi_try!(mupdf_pdf_trailer(context(), self.inner)) }
             .map(|inner| unsafe { PdfObject::from_raw(inner) })

@@ -343,6 +343,29 @@ impl PdfObject {
         Ok(Some(Self { inner }))
     }
 
+    /// Get a text string value from a dict entry by key.
+    /// Returns `Ok(None)` if the key is not present.
+    pub fn get_dict_string<K: IntoPdfDictKey>(&self, key: K) -> Result<Option<PdfString>, Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        let ptr = unsafe {
+            ffi_try!(mupdf_pdf_dict_get_string(
+                context(),
+                self.inner,
+                key_obj.inner
+            ))
+        }?;
+
+        if ptr.is_null() {
+            return Ok(None);
+        }
+
+        match PdfString::try_from(unsafe { CStr::from_ptr(ptr) }) {
+            Ok(text) if !text.is_empty() => Ok(Some(text)),
+            Ok(_) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn get_dict_inheritable<K: IntoPdfDictKey>(&self, key: K) -> Result<Option<Self>, Error> {
         let key = key.into_pdf_dict_key()?;
         let inner = unsafe {
@@ -420,6 +443,107 @@ impl PdfObject {
                 value.inner
             ))
         }
+    }
+
+    pub fn dict_put_name<K>(&mut self, key: K, name: impl TryAsCStr) -> Result<(), Error>
+    where
+        K: IntoPdfDictKey,
+    {
+        let key_obj = key.into_pdf_dict_key()?;
+        let c_name = name.try_as_c_str()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_name(
+                context(),
+                self.inner,
+                key_obj.inner,
+                c_name.as_ptr()
+            ))
+        }
+    }
+
+    pub fn dict_put_int<K: IntoPdfDictKey>(&mut self, key: K, value: i32) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_int(
+                context(),
+                self.inner,
+                key_obj.inner,
+                value as i64
+            ))
+        }
+    }
+
+    pub fn dict_put_string<K, T>(&mut self, key: K, text: T) -> Result<(), Error>
+    where
+        K: IntoPdfDictKey,
+        T: TryAsCStr,
+    {
+        let key_obj = key.into_pdf_dict_key()?;
+        let c_text = text.try_as_c_str()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_string(
+                context(),
+                self.inner,
+                key_obj.inner,
+                c_text.as_ptr()
+            ))
+        }
+    }
+
+    pub fn dict_put_bool<K: IntoPdfDictKey>(&mut self, key: K, value: bool) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_bool(
+                context(),
+                self.inner,
+                key_obj.inner,
+                value as i32
+            ))
+        }
+    }
+
+    pub fn dict_put_real<K: IntoPdfDictKey>(&mut self, key: K, value: f32) -> Result<(), Error> {
+        let key_obj = key.into_pdf_dict_key()?;
+        unsafe {
+            ffi_try!(mupdf_pdf_dict_put_real(
+                context(),
+                self.inner,
+                key_obj.inner,
+                value
+            ))
+        }
+    }
+
+    pub fn dict_put_array<K>(&mut self, key: K, capacity: i32) -> Result<PdfObject, Error>
+    where
+        K: IntoPdfDictKey,
+    {
+        let key_obj = key.into_pdf_dict_key()?;
+        let inner = unsafe {
+            ffi_try!(mupdf_pdf_dict_put_array(
+                context(),
+                self.inner,
+                key_obj.inner,
+                capacity
+            ))
+        }?;
+        Ok(Self { inner })
+    }
+
+    pub fn dict_put_dict<K>(&mut self, key: K, capacity: i32) -> Result<PdfObject, Error>
+    where
+        K: IntoPdfDictKey,
+    {
+        let key_obj = key.into_pdf_dict_key()?;
+        let inner = unsafe {
+            ffi_try!(mupdf_pdf_dict_put_dict(
+                context(),
+                self.inner,
+                key_obj.inner,
+                capacity
+            ))
+        }?;
+        Ok(Self { inner })
     }
 
     pub fn dict_delete<K: IntoPdfDictKey>(&mut self, key: K) -> Result<(), Error> {
